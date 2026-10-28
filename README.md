@@ -105,7 +105,20 @@ PNG → base64 → `postMessage` 给页面 → 走 Lexical 粘贴事件塞进输
 数据目录固定是 `%LOCALAPPDATA%\dsh-hud\`（`config.ini`、`window.txt`、日志、WebView2 用户数据），
 改名前后没动过，装到别的机器上也是这个路径、按用户隔离。
 
-## 安装（本机已做）
+## 安装
+
+### A. 从 npm 装（别人用这个）
+
+```bash
+cd ~/.dsh/profiles/desktop
+npm install dsh-mini
+```
+
+然后在同一个 `package.json` 的 `dsh.profile.bundles` 末尾加一项 `"dsh-mini"`，重启 DSH（或 `plugin_manager set_bundle` 关一次再开一次）。
+
+装完不需要额外配置：插件会在 DSH 启动 2.5 秒后自己拉起常驻服务（划词药丸 + 全局热键 + 托盘），小窗由标题栏的「弹出此窗口」按需打开。**前提是机器上已有 WebView2 Runtime**（见上面「系统要求」）。
+
+### B. 本机 link（改代码时用）
 
 profile 走 `link:` 依赖，和 `tju-plugin` 一样：
 
