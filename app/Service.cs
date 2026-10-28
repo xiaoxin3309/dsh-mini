@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -19,6 +19,7 @@ namespace DshHud
         internal bool Ask;
         internal string HotkeyFull;
         internal string HotkeyRegion;
+        internal bool TextFallback;
 
         internal HudConfig()
         {
@@ -26,6 +27,7 @@ namespace DshHud
             Ask = true;
             HotkeyFull = "Ctrl+Shift+1";
             HotkeyRegion = "Ctrl+Shift+2";
+            TextFallback = false;
         }
 
         internal static string Dir
@@ -61,6 +63,7 @@ namespace DshHud
                     else if (key == "ask") cfg.Ask = val != "0";
                     else if (key == "hotkeyFull") cfg.HotkeyFull = val;
                     else if (key == "hotkeyRegion") cfg.HotkeyRegion = val;
+                    else if (key == "textFallback") cfg.TextFallback = val != "0";
                 }
             }
             catch
@@ -79,6 +82,7 @@ namespace DshHud
                 sb.AppendLine("ask=" + (Ask ? "1" : "0"));
                 sb.AppendLine("hotkeyFull=" + HotkeyFull);
                 sb.AppendLine("hotkeyRegion=" + HotkeyRegion);
+                sb.AppendLine("textFallback=" + (TextFallback ? "1" : "0"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch
@@ -250,6 +254,7 @@ namespace DshHud
             watcher = new SelectionWatcher(host);
             watcher.QuoteRequested += DeliverQuote;
             watcher.Enabled = config.Ask;
+            SelectionReader.ClipboardFallback = config.TextFallback;
 
             tray = new NotifyIcon();
             tray.Icon = SystemIcons.Application;
@@ -313,9 +318,11 @@ namespace DshHud
             config = HudConfig.Load();
             watcher.Enabled = config.Ask;
             askItem.Checked = config.Ask;
+            SelectionReader.ClipboardFallback = config.TextFallback;
             host.Bind(config);
             SelectionWatcher.Log("config reloaded: hotkeyFull=" + config.HotkeyFull +
-                                 " hotkeyRegion=" + config.HotkeyRegion);
+                                 " hotkeyRegion=" + config.HotkeyRegion +
+                                 " textFallback=" + (config.TextFallback ? "1" : "0"));
         }
 
         private void OnHotkey(string kind)

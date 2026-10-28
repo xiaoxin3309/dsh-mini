@@ -52,13 +52,90 @@ namespace DshHud
 
         internal const uint GA_ROOT = 2;
         internal const int VK_LBUTTON = 0x01;
-        internal const byte VK_CONTROL = 0x11;
+        internal const int VK_SHIFT = 0x10;
+        internal const int VK_CONTROL = 0x11;
+        internal const int VK_MENU = 0x12;
         internal const byte VK_C = 0x43;
         internal const uint KEYEVENTF_KEYUP = 0x0002;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct GUITHREADINFO
+        {
+            public int cbSize;
+            public uint flags;
+            public IntPtr hwndActive;
+            public IntPtr hwndFocus;
+            public IntPtr hwndCapture;
+            public IntPtr hwndMenuOwner;
+            public IntPtr hwndMoveSize;
+            public IntPtr hwndCaret;
+            public RECT rcCaret;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct RECT
+        {
+            public int left;
+            public int top;
+            public int right;
+            public int bottom;
+        }
+
+        [DllImport("user32.dll")]
+        internal static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        internal static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam,
+            IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+        internal const uint WM_COPY = 0x0301;
+        internal const uint SMTO_ABORTIFHUNG = 0x0002;
 
         internal static bool IsMouseDown()
         {
             return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        }
+
+        internal static bool IsKeyDown(int vk)
+        {
+            return (GetAsyncKeyState(vk) & 0x8000) != 0;
+        }
+
+        /// <summary>
+        /// True while the user holds Ctrl/Alt/Shift himself. Every probe is skipped then:
+        /// injecting our own Ctrl+C on top of a real one is what made the user's copies
+        /// land empty, and it can also cancel a drag-copy in Explorer.
+        /// </summary>
+        internal static bool IsModifierDown()
+        {
+            return IsKeyDown(VK_CONTROL) || IsKeyDown(VK_MENU) || IsKeyDown(VK_SHIFT);
+        }
+
+        /// <summary>
+        /// The control that currently has the keyboard focus. WM_COPY has to be delivered to
+        /// the edit control, not the top-level window.
+        /// </summary>
+        internal static IntPtr FocusedControl()
+        {
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                if (fg == IntPtr.Zero) return IntPtr.Zero;
+                uint pid;
+                uint tid = GetWindowThreadProcessId(fg, out pid);
+                GUITHREADINFO gti = new GUITHREADINFO();
+                gti.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+                if (GetGUIThreadInfo(tid, ref gti))
+                {
+                    if (gti.hwndFocus != IntPtr.Zero) return gti.hwndFocus;
+                    if (gti.hwndActive != IntPtr.Zero) return gti.hwndActive;
+                }
+                return fg;
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
         }
 
         /// <summary>
@@ -187,6 +264,28 @@ namespace DshHud
             return false;
         }
 
+        /// <summary>
+        /// Ask the focused control to copy through WM_COPY. This is the polite fallback:
+        /// no keystrokes are synthesised, so a real Ctrl+C pressed by the user is never
+        /// raced or cancelled, and nothing is written back over the clipboard.
+        /// </summary>
+        internal static bool SendCopyMessage()
+        {
+            try
+            {
+                IntPtr target = FocusedControl();
+                if (target == IntPtr.Zero) return false;
+                IntPtr result;
+                SendMessageTimeout(target, WM_COPY, IntPtr.Zero, IntPtr.Zero,
+                    SMTO_ABORTIFHUNG, 300, out result);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static void SendCopy()
         {
             keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
@@ -218,6 +317,14 @@ namespace DshHud
 
     internal static class SelectionReader
     {
+        /// <summary>
+        /// Off by default. UIA answers for every modern text surface without touching the
+        /// keyboard or the clipboard; the copy-based path is only needed by legacy controls,
+        /// and it necessarily competes with the user's own Ctrl+C. Users can enable it from
+        /// the settings page.
+        /// </summary>
+        internal static bool ClipboardFallback;
+
         /// <summary>
         /// Read the current selection. UIA first: it is passive (no keystrokes, no clipboard
         /// churn) and it also tells us where the selection ends, which is what the pill
@@ -275,7 +382,7 @@ namespace DshHud
             {
             }
 
-            hit.Text = Read();
+            if (ClipboardFallback) hit.Text = Read();
             return hit;
         }
 
@@ -338,16 +445,23 @@ namespace DshHud
 
         private static string ReadOnStaThread()
         {
-            IDataObject backup = null;
-            try
-            {
-                backup = Clipboard.GetDataObject();
-            }
-            catch
-            {
-            }
+            // No clipboard backup/restore any more. Restoring was the actual damage: while
+            // we waited for our own copy to land, the user's real Ctrl+C could complete
+            // first, and our restore then threw that copy away ("复制不上"). Now the worst
+            // case is that the selection text stays on the clipboard — which is exactly
+            // what the user just asked for anyway.
+            if (ShellWin.IsModifierDown()) return "";
 
             uint seq = ShellWin.GetClipboardSequenceNumber();
+            bool asked = ShellWin.SendCopyMessage();
+            if (!asked) return "";
+
+            string text = WaitForClipboardText(seq, 320);
+            if (!string.IsNullOrEmpty(text)) return Finish(text);
+
+            // WM_COPY is ignored by a few legacy controls; only then fall back to a real
+            // key chord, and only when the user has opted in.
+            if (!ClipboardFallback || ShellWin.IsModifierDown()) return "";
             try
             {
                 ShellWin.SendCopy();
@@ -356,32 +470,33 @@ namespace DshHud
             {
                 return "";
             }
+            text = WaitForClipboardText(seq, 700);
+            return string.IsNullOrEmpty(text) ? "" : Finish(text);
+        }
 
-            string text = null;
+        /// <summary>Wait until the clipboard sequence number moves, then read its text.</summary>
+        private static string WaitForClipboardText(uint seq, int budgetMs)
+        {
             int waited = 0;
-            while (waited < 900)
+            while (waited < budgetMs)
             {
-                Thread.Sleep(30);
-                waited += 30;
+                Thread.Sleep(25);
+                waited += 25;
                 if (ShellWin.GetClipboardSequenceNumber() == seq) continue;
                 try
                 {
-                    if (Clipboard.ContainsText()) text = Clipboard.GetText();
+                    if (Clipboard.ContainsText()) return Clipboard.GetText();
                 }
                 catch
                 {
                 }
-                break;
+                return "";
             }
+            return "";
+        }
 
-            try
-            {
-                if (backup != null) Clipboard.SetDataObject(backup, false);
-            }
-            catch
-            {
-            }
-
+        private static string Finish(string text)
+        {
             if (string.IsNullOrEmpty(text)) return "";
             text = text.Replace("\r\n", "\n").Replace('\r', '\n').Trim();
             if (text.Length == 0) return "";
@@ -748,6 +863,9 @@ namespace DshHud
         private void Kick(Point pt, int delay)
         {
             if (!enabled) { Log("skip: disabled"); return; }
+            // A drag with Ctrl/Shift/Alt held is a copy or an extension, not a fresh
+            // selection: probing it races the user's own shortcut.
+            if (ShellWin.IsModifierDown()) { Log("skip: modifier down"); return; }
 
             if (ShellWin.IsShellSurfaceAt(pt)) { Log("skip: shell surface"); return; }
             int id = ++probeId;

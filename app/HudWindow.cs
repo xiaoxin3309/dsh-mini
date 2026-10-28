@@ -228,6 +228,7 @@ namespace DshHud
 
             config = HudConfig.Load();
             configStamp = HudConfig.Stamp();
+            SelectionReader.ClipboardFallback = config.TextFallback;
         }
 
         private Size Logical(int w, int h)
@@ -567,7 +568,9 @@ namespace DshHud
                 {
                     configStamp = stamp;
                     config = HudConfig.Load();
-                    Log("config reloaded copyShot=" + config.CopyShot);
+                    SelectionReader.ClipboardFallback = config.TextFallback;
+                    Log("config reloaded copyShot=" + config.CopyShot +
+                        " textFallback=" + (config.TextFallback ? "1" : "0"));
                 }
 
                 string quote = HudConfig.QuotePath;
