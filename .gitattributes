@@ -1,0 +1,13 @@
+# Keep the PowerShell scripts CRLF (Windows PowerShell 5.1 is happier) and the
+# JS LF; binaries are never converted.
+* text=auto
+*.ps1 text eol=crlf
+*.cs text eol=crlf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.png binary
+*.exe binary
+*.dll binary

@@ -1,0 +1,71 @@
+{
+  "name": "dsh-mini",
+  "version": "0.1.2",
+  "description": "DSH 常驻小窗插件：把当前会话一键弹出为独立置顶小窗（WebView2 原生窗口），含整屏/框选截图、划词「问大肥鱼」、全局快捷键与截图自动复制",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "always-on-top",
+    "screenshot",
+    "webview2"
+  ],
+  "homepage": "https://www.npmjs.com/package/dsh-mini",
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "app/bin",
+    "app/*.cs",
+    "app/hud-page.js",
+    "app/app.manifest",
+    "app/build-app.ps1",
+    "app/dev.ps1",
+    "app/probe",
+    "app/vendor/*.dll",
+    "cordis.patch.yml",
+    "README.md",
+    "开发方案-WebView2原生小窗.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    },
+    "compatibility": {
+      "node": ">=20",
+      "dsh": ">=0.2.0-rc.1"
+    }
+  },
+  "dependencies": {},
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File app/build-app.ps1",
+    "pack": "npm pack"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.0-rc.1"
+  }
+}

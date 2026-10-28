@@ -1,0 +1,16 @@
+# dsh-mini bundle patch
+#
+# 一行 insert 挂载宿主半身（HTTP 路由 + 开窗）。
+# 浏览器半身由 package.json 的 dsh.client 声明，绑定在 name 为裸包名的这一行上。
+# name 必须与 package.json 的包名完全一致。
+- insert:
+    - id: dsh-mini
+      name: 'dsh-mini'
+      config:
+        # 小窗页面标题前缀：PowerShell 靠它定位/置顶/隐藏这扇窗
+        titlePrefix: 'DSH 小窗'
+        # 小窗初始尺寸（逻辑像素）
+        width: 460
+        height: 560
+        # 留空则自动探测 Edge / Chrome
+        browserPath: ''

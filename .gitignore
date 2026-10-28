@@ -1,0 +1,13 @@
+# installed dependencies / local links
+node_modules/
+
+# npm pack output
+*.tgz
+
+# build-time WebView2 reference assemblies (restored from NuGet by app/build-app.ps1)
+app/vendor/
+
+# scratch screenshots from region-capture debugging (the four demo-*.png are kept)
+region-*.png
+region-overlay*.png
+*.pdb
