@@ -318,12 +318,17 @@ namespace DshHud
     internal static class SelectionReader
     {
         /// <summary>
-        /// Off by default. UIA answers for every modern text surface without touching the
-        /// keyboard or the clipboard; the copy-based path is only needed by legacy controls,
-        /// and it necessarily competes with the user's own Ctrl+C. Users can enable it from
-        /// the settings page.
+        /// On by default, but only ever consulted after UIA came back empty — so modern text
+        /// surfaces (Notepad, WinForms, WPF, Office, the browser's own chrome) never touch the
+        /// clipboard. Chromium content and legacy controls expose no TextPattern at all, and for
+        /// those a copy is the only way to read the selection.
+        ///
+        /// Crucially the copy is *not* undone: the old implementation restored the previous
+        /// clipboard contents afterwards, and that restore raced the user's own Ctrl+C and
+        /// overwrote what they had just copied. Losing the previous clipboard contents is the
+        /// price of reading a selection here; breaking Ctrl+C is not.
         /// </summary>
-        internal static bool ClipboardFallback;
+        internal static bool ClipboardFallback = true;
 
         /// <summary>
         /// Read the current selection. UIA first: it is passive (no keystrokes, no clipboard
@@ -453,14 +458,21 @@ namespace DshHud
             if (ShellWin.IsModifierDown()) return "";
 
             uint seq = ShellWin.GetClipboardSequenceNumber();
-            bool asked = ShellWin.SendCopyMessage();
-            if (!asked) return "";
+            // WM_COPY is best effort only: Win32 edits answer it, Chromium and most
+            // modern renderers ignore it, and SendMessageTimeout also returns false
+            // when the target window is busy. Never treat "no answer" as "no selection".
+            ShellWin.SendCopyMessage();
 
             string text = WaitForClipboardText(seq, 320);
-            if (!string.IsNullOrEmpty(text)) return Finish(text);
+            if (!string.IsNullOrEmpty(text))
+            {
+                SelectionWatcher.Log("copy: wm_copy " + text.Length + " chars");
+                return Finish(text);
+            }
 
-            // WM_COPY is ignored by a few legacy controls; only then fall back to a real
-            // key chord, and only when the user has opted in.
+            // A real key chord is the only thing that works for Chromium content and
+            // legacy controls. Only when the user has opted in, and never while they
+            // are holding a modifier themselves.
             if (!ClipboardFallback || ShellWin.IsModifierDown()) return "";
             try
             {
@@ -471,6 +483,8 @@ namespace DshHud
                 return "";
             }
             text = WaitForClipboardText(seq, 700);
+            SelectionWatcher.Log("copy: key_chord " + (text == null ? 0 : text.Length) +
+                " chars seq " + seq + "->" + ShellWin.GetClipboardSequenceNumber());
             return string.IsNullOrEmpty(text) ? "" : Finish(text);
         }
 

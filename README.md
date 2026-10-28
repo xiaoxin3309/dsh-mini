@@ -179,12 +179,17 @@ cd app
 
 * 实现在 `app/SelectionWatcher.cs`：全局鼠标轮询（90ms）→ 松开时若拖动距离 ≥6 逻辑像素、
   且不在小窗/药丸自己身上 → 后台线程等 130ms（双击选词等 320ms）→ 校验仍在前台 → 取选区。
-* **取选区走系统辅助功能（UIA `TextPattern`），不碰键盘也不碰剪贴板**：拿到文本的同时还能拿到
-  选区最后一行/一个字的矩形，药丸才能精确贴在它右下角。绝大多数现代程序（Notepad、Chrome/Edge、
-  Word、WPS、VS Code、DSH 自己）都支持。
-* 只有用户显式打开设置里的**兼容模式**，UIA 读不到时才补一次读剪贴板：先给焦点控件发 `WM_COPY`
-  （不合成按键），仍不行才真的发一次 `Ctrl+C`。**任何情况下都不再做「备份 → 复制 → 还原」**——
-  之前那套会把你自己的 `Ctrl+C` 覆盖掉，这正是"选中后复制不上"的元凶。
+* **取选区三级阶梯**（`SelectionReader.ReadHit`），从最无侵入的一档开始：
+  1. **UI Automation**（`TextPattern`）—— 不碰键盘、不碰剪贴板，还能拿到选区最后一行/一个字的矩形，
+     药丸因此能精确贴在它右下角。Notepad、Word、WPS、VS Code、WinForms/WPF、DSH 自己都走这一档。
+  2. **`WM_COPY`** —— 发给焦点控件，不发按键。部分老式编辑框只认这条。
+  3. **合成一次 `Ctrl+C`** —— 只有前两档都拿不到时才用。**浏览器正文（Chromium）、部分 Electron 应用、
+     某些游戏/自绘控件根本没有 `TextPattern` 也没有 `WM_COPY`，这是唯一可行的手段**。
+* **绝不做「备份剪贴板 → 复制 → 还原」**。之前那套是"选中后复制不上"的元凶：还原那一步会把你刚按的
+  `Ctrl+C` 覆盖回旧内容。现在第三档会**把选区留在剪贴板里**（你在浏览器里划一下就发现 `Ctrl+V` 有内容了），
+  代价是<u>占用</u>剪贴板，而不是<u>破坏</u>它 —— 这是读取 Chromium 选区的唯一代价，取舍写在明处。
+* 设置页的「选区读取：辅助功能读不到时改用复制」**默认打开**；关掉后浏览器正文里就不会再弹按钮，
+  但剪贴板绝对不会被碰（适合只用 Office/记事本、或对剪贴板敏感的场景）。
 * 保护：按住 Ctrl/Alt/Shift 时的拖动直接跳过（那是复制/扩选，不是重新选词）；终端
   （console/cascadia/mintty/putty）不发按键；资源管理器/桌面/任务栏（Progman/WorkerW/CabinetWClass…）
   一律跳过（否则会真的复制文件、污染 `Win+V` 历史）；用户按着修饰键期间完全不介入。
@@ -192,8 +197,9 @@ cd app
   `%LOCALAPPDATA%\dsh-hud\ask.txt`。
 * 因此**标题条 ✕ 只是收进托盘**（不是退出）——watcher 活在这个进程里，退出了就没法划词。
   彻底退出用托盘菜单「退出」。
-* 诊断：`hud.log` 里 `[pill]` 开头的行会写每次 `kick / skip / read N chars`；
-  往 `%LOCALAPPDATA%\dsh-hud\seltest.txt` 写任意内容可触发一次「只读不弹」的自检。
+* 诊断：`hud.log` 里 `[pill]` 开头的行会写每次 `kick / skip / read N chars`，以及实际走了哪一档：
+  `copy: wm_copy N chars`、`copy: key_chord N chars seq A->B`（`0 chars` 且序号没动，说明那儿没有真选中
+  或目标程序忽略了合成按键）；往 `%LOCALAPPDATA%\dsh-hud\seltest.txt` 写任意内容可触发一次「只读不弹」的自检。
 
 ## 常驻划词服务、全局快捷键与设置页
 
@@ -261,9 +267,12 @@ cd ..;  npm pack             # → dsh-mini-0.1.0.tgz（约 600 KB）
 * 截图只有「整屏」和「框选/吸附窗口」两种，没有滚动长截图；框选吸附依赖窗口标题非空，
   无标题窗口（部分全屏游戏、自绘界面）会退化成「该点所在的整块屏幕」。
   （滚动长截图评估过：要拼接滚动帧 + 去重 + 处理懒加载，工作量明显大于本轮其它几项，先没做。）
-* 划词优先走 UI Automation `TextPattern.GetSelection()`（无侵入、能拿到选区矩形），
-  只有 UIA 读不到时才回退「发 Ctrl+C 读剪贴板」；终端（console/cascadia/mintty/putty）
-  和桌面/资源管理器窗口直接跳过，避免 Ctrl+C 变成 SIGINT 或真的复制文件。
+* 划词按三级阶梯取选区：UIA `TextPattern`（无侵入、带选区矩形）→ `WM_COPY`（发消息、不发按键）→
+  合成一次 `Ctrl+C`。**Chromium 正文没有 `TextPattern`、也不响应 `WM_COPY`**（我实测过 UIA 与
+  IAccessible2 两条路都拿不到选区），所以浏览器里必然走到第三档，会占用剪贴板；不想被碰可在设置页关掉
+  「选区读取：辅助功能读不到时改用复制」。终端（console/cascadia/mintty/putty）和桌面/资源管理器窗口
+  直接跳过，避免 Ctrl+C 变成 SIGINT 或真的复制文件。**任何情况都不再还原旧剪贴板内容**——那正是以前
+  「选中后 Ctrl+C 复制不上」的根因。
 * 主题色与小窗边框：导航完成后同步两次，另外每 6 秒复查一次页面背景色；
   跨显示器拖到不同 DPI 的屏会收到 `WM_DPICHANGED` 并重算标题条/图标/最小尺寸。
 * 标题条图标是 `Segoe MDL2 Assets` 字体，字号偏小（E8BB 关闭键取 8.5f 才和其它图标一样大）。

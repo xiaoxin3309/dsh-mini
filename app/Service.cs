@@ -27,7 +27,7 @@ namespace DshHud
             Ask = true;
             HotkeyFull = "Ctrl+Shift+1";
             HotkeyRegion = "Ctrl+Shift+2";
-            TextFallback = false;
+            TextFallback = true;
         }
 
         internal static string Dir
