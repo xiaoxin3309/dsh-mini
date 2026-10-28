@@ -118,17 +118,18 @@ npm install dsh-mini
 
 装完不需要额外配置：插件会在 DSH 启动 2.5 秒后自己拉起常驻服务（划词药丸 + 全局热键 + 托盘），小窗由标题栏的「弹出此窗口」按需打开。**前提是机器上已有 WebView2 Runtime**（见上面「系统要求」）。
 
-### B. 本机 link（改代码时用）
+### B. 源码 link（改代码时用）
 
-profile 走 `link:` 依赖，和 `tju-plugin` 一样：
+改代码不必每次 `npm pack`，把 profile 里的依赖指向你本地这份仓库即可：
 
 ```jsonc
 // ~/.dsh/profiles/desktop/package.json
-"dependencies": { "dsh-mini": "link:C:/Users/xiaoxin3309/Documents/deepseek-harness/default-workspace/dsh-hud-window" },
+"dependencies": { "dsh-mini": "link:<本仓库在你机器上的绝对路径>" },
 "dsh": { "profile": { "bundles": [ ..., "dsh-mini" ] } }
 ```
 
-`node_modules/dsh-mini` 是指向本目录的 junction，改代码不需要重新安装。
+把 `<本仓库在你机器上的绝对路径>` 换成你 clone 下来的那个目录（例如 `C:/code/dsh-mini`），
+然后 `npm install` 让 npm 建好 `node_modules/dsh-mini` 这层链接；之后改代码不需要重新安装。
 宿主半身（`lib/index.js`）的改动需要 `plugin_manager set_bundle` 关一次再开一次（或重启 DSH）；
 浏览器半身（`lib/client.js`）的改动需要**刷新页面**（`F5`）——bundle 的 `rev` 由内容算出，刷新即取新版。
 
