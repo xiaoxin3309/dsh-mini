@@ -1,5 +1,10 @@
 # dsh-mini
 
+[![npm](https://img.shields.io/npm/v/dsh-mini.svg)](https://www.npmjs.com/package/dsh-mini)
+[![license](https://img.shields.io/npm/l/dsh-mini.svg)](LICENSE)
+
+仓库 https://github.com/xiaoxin3309/dsh-mini ｜ npm 包名 `dsh-mini`
+
 把当前会话一键弹出成一个**独立置顶小窗**，小窗里有整屏截图和框选截图两个键（截图时小窗自己不进入画面，图片直接插进输入框）；在任意程序里选中文字，还会就地弹出「问大肥鱼」小药丸，点一下把小窗叫出来并引用那段话。
 
 ```

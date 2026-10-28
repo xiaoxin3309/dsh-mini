@@ -13,7 +13,14 @@
     "screenshot",
     "webview2"
   ],
-  "homepage": "https://www.npmjs.com/package/dsh-mini",
+  "homepage": "https://github.com/xiaoxin3309/dsh-mini#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoxin3309/dsh-mini.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaoxin3309/dsh-mini/issues"
+  },
   "os": [
     "win32"
   ],
