@@ -122,6 +122,11 @@ npm install dsh-mini
 
 装完不需要额外配置：插件会在 DSH 启动 2.5 秒后自己拉起常驻服务（划词药丸 + 全局热键 + 托盘），小窗由标题栏的「弹出此窗口」按需打开。**前提是机器上已有 WebView2 Runtime**（见上面「系统要求」）。
 
+> **exe 会被自动复制到工作区之外**：第一次用到时，插件把 `app/bin/` 里的 exe 与三个 dll
+> 拷到 `%LOCALAPPDATA%\dsh-mini\bin\`，之后一切都从那里跑（数据目录是同级 `bin\data\`）。
+> 原因见下面「为什么不能就地运行」——DSH 的工作区沙箱会按镜像路径限制**位于工作区里的**可执行文件，
+> 就地跑会出现「写不了 AppData、读不到鼠标、WebView2 拒绝访问」这一串怪现象。
+
 ### B. 源码 link（改代码时用）
 
 改代码不必每次 `npm pack`，把 profile 里的依赖指向你本地这份仓库即可：
@@ -156,7 +161,7 @@ npm install dsh-mini
 | `/dsh-mini/focus` | POST | 重新置顶 |
 | `/dsh-mini/shot` | POST | 截全屏（不含小窗），回 dataURL |
 | `/dsh-mini/state` | GET | 小窗是否在跑 |
-| `/dsh-mini/trace` | GET | 诊断信标：把 `step/detail` 追加到 `%LOCALAPPDATA%\dsh-hud\trace.log` |
+| `/dsh-mini/trace` | GET | 诊断信标：把 `step/detail` 追加到 `<data>\trace.log` |
 
 ## 构建原生壳
 
@@ -170,20 +175,32 @@ cd app
 
 ## 调试
 
-* `%LOCALAPPDATA%\dsh-hud\hud.log`：壳自己的日志（导航、eval 结果、异常）。
-* `%LOCALAPPDATA%\dsh-hud\trace.log`：页面侧信标（`apply` / `click` / `opened` / `open-failed`）。
+`<data>` 指 `%LOCALAPPDATA%\dsh-mini\bin\data\`（exe 就在它隔壁 `bin\` 里）。
+
+* `<data>\hud.log`：壳自己的日志（导航、WebView2 各阶段、划词、eval 结果、异常）。
+* `<data>\trace.log`：页面侧信标（`apply` / `click` / `opened` / `open-failed`）。
   页面没有 console 通道，这是唯一能从外部看到页面行为的办法。
 * `app/dev.ps1 -Build -Url <带 token 的地址> [-Eval probe.js]`：杀旧进程 → 构建 → 启动 → 跑一段
   JS 到页面里 → 打印 `hud.log`。`app/probe/*.js` 是现成的探测脚本。
-* 页面里跑 eval 的办法：把 JS 写进 `%LOCALAPPDATA%\dsh-hud\eval.js`，壳 700ms 内会执行并把结果写进 `hud.log`。
+* 页面里跑 eval 的办法：把 JS 写进 `<data>\eval.js`，壳 700ms 内会执行并把结果写进 `hud.log`。
+* 三个开关文件（存在即开，删掉即静默）：`<data>\uia.txt`（UIA 详情）、`<data>\poll.txt`（轮询/hook 状态）、
+  `<data>\seltest.txt`（触发一次只读不弹的自检）。
 
 ## 划词问大肥鱼
 
 在**任何程序**里用鼠标选中一段文字，松开后光标右下方会弹出蓝色小药丸「问大肥鱼」；点它，
 小窗自动弹到最前，选中的内容以引用块（每行 `> ` 前缀）插进输入框，直接接着提问即可。
 
-* 实现在 `app/SelectionWatcher.cs`：全局鼠标轮询（90ms）→ 松开时若拖动距离 ≥6 逻辑像素、
-  且不在小窗/药丸自己身上 → 后台线程等 130ms（双击选词等 320ms）→ 校验仍在前台 → 取选区。
+* 实现在 `app/SelectionWatcher.cs`：**低级鼠标钩子**（`SetWindowsHookEx(WH_MOUSE_LL)`）拿按下/抬起，
+  松开时若拖动距离 ≥6 逻辑像素、且不在小窗/药丸自己身上 → 后台线程等 130ms（双击选词等 320ms）→
+  校验仍在前台 → 取选区。
+  > 为什么不用 90ms 轮询 `GetAsyncKeyState`：从 DSH 宿主进程树里派生出来的进程读不到输入状态
+  > （恒为 0，实测 `poll alive down=False ks=False`），钩子能在系统层面收到消息，不受这个限制。
+  > 钩子装不上时才回退到轮询。
+* **判断「这次划词该不该管」用的是前台窗口，不是光标下的窗口**。WinUI 版记事本、设置、截图工具这类应用的
+  内容在独立合成层里，`WindowFromPoint` 在它们内部会返回桌面 `Progman` —— 早期按坐标判断时，这些窗口里的
+  划词全被当成"点在桌面上"跳过（日志里是一串 `skip: shell surface Progman`）。现在只在一个窗口**确实是**
+  桌面 / 任务栏 / 资源管理器时才跳过，坐标只用于给药丸定位。
 * **取选区三级阶梯**（`SelectionReader.ReadHit`），从最无侵入的一档开始：
   1. **UI Automation**（`TextPattern`）—— 不碰键盘、不碰剪贴板，还能拿到选区最后一行/一个字的矩形，
      药丸因此能精确贴在它右下角。Notepad、Word、WPS、VS Code、WinForms/WPF、DSH 自己都走这一档。
@@ -199,12 +216,14 @@ cd app
   （console/cascadia/mintty/putty）不发按键；资源管理器/桌面/任务栏（Progman/WorkerW/CabinetWClass…）
   一律跳过（否则会真的复制文件、污染 `Win+V` 历史）；用户按着修饰键期间完全不介入。
 * 药丸 9 秒无操作自动消失；托盘菜单「划词问大肥鱼」可随时关掉，状态存在
-  `%LOCALAPPDATA%\dsh-hud\ask.txt`。
+  `%LOCALAPPDATA%\dsh-mini\bin\data\ask.txt`。
 * 因此**标题条 ✕ 只是收进托盘**（不是退出）——watcher 活在这个进程里，退出了就没法划词。
   彻底退出用托盘菜单「退出」。
 * 诊断：`hud.log` 里 `[pill]` 开头的行会写每次 `kick / skip / read N chars`，以及实际走了哪一档：
   `copy: wm_copy N chars`、`copy: key_chord N chars seq A->B`（`0 chars` 且序号没动，说明那儿没有真选中
-  或目标程序忽略了合成按键）；往 `%LOCALAPPDATA%\dsh-hud\seltest.txt` 写任意内容可触发一次「只读不弹」的自检。
+  或目标程序忽略了合成按键）；`kick` 行还带 `fg= / root= / class= / underCursor=`，一眼看出命中的是哪个窗口。
+  往 `<data>\seltest.txt` 写任意内容可触发一次「只读不弹」的自检；`<data>\uia.txt`、`<data>\poll.txt`
+  分别是 UIA 详情与轮询状态的高噪声追踪，删掉文件即静默（`<data>` = `%LOCALAPPDATA%\dsh-mini\bin\data`）。
 
 ## 常驻划词服务、全局快捷键与设置页
 
@@ -267,23 +286,54 @@ cd ..;  npm pack             # → dsh-mini-0.1.0.tgz（约 600 KB）
 
 ### 小窗是怎么被启动的（重要）
 
-插件不直接 `spawn` 小窗 exe，而是先用 `schtasks /Create … /SC ONCE /ST 23:59 /TN DshMiniWindow`
-登记一个一次性计划任务，再 `schtasks /Run` 触发它。
+#### 为什么不能就地运行（DSH 工作区沙箱）
 
-原因是宿主进程树里派生的子进程会继承一个受限令牌/作业对象，这种进程里 `EnsureCoreWebView2Async`
-必然失败并报 `E_ACCESSDENIED 0x80070005`（表现是「WebView2 初始化失败：拒绝访问」）。
-交给 Task Scheduler 服务去创建进程，拿到的是干净的用户令牌，WebView2 就能正常初始化。
-任务名固定为 `DshMiniWindow`，一次性、定时 23:59，平时不会自己触发；重装插件会覆盖同名任务。
-后台服务（划词药丸、全局热键）不需要 WebView2，仍然直接启动，不受影响。
+DSH 的工作区沙箱是**按可执行文件所在路径**生效的：只要 exe 躺在工作区目录里，它派生出来的进程就会
+继承受限的作业对象 / 令牌 —— 具体表现是三条，全都命中过：
 
-计划任务的触发时间固定在 **2099/12/31 23:59**，所以它永远不会自己弹窗，只有点「弹出此窗口」时才会被手动 `Run`；
-每次打开都会 `/F` 覆盖创建一遍，因此换了安装路径、重装了插件都不会指向旧的 exe。普通用户账户即可创建，
-不需要管理员权限。如果所在机器的组策略禁止创建计划任务，插件会回退成直接 `spawn`（受限令牌下 WebView2 可能初始化失败）。
+| 现象 | 日志指纹 |
+| --- | --- |
+| 写不了 `%LOCALAPPDATA%` / `%TEMP%` | `DIAG … appdata=FAIL temp=FAIL 0x80070005` |
+| 读不到鼠标状态 | `poll alive down=False ks=False held=0000/0000/0000` |
+| WebView2 初始化被拒 | `wv2: FAIL UnauthorizedAccessException 0x80070005` |
 
-卸载插件不会删除这个任务（npm 卸载没有钩子），需要时手工清掉：
+对照组很简单：把同一份 exe 拷到 `%LOCALAPPDATA%\dsh-mini-test\` 再跑，`DIAG` 立刻变成
+`appdata=OK temp=OK`。所以插件在第一次运行前会 `stageExe()` 把
+`app/bin/DSH小窗.exe` + 三个 dll 复制到 `%LOCALAPPDATA%\dsh-mini\bin\`（按 size+mtime 比对，改代码后
+自动更新；目标正被占用时先 `rename` 到 `.busy-<时间戳>` 再复制，Windows 允许重命名运行中的镜像）。
+
+#### 为什么用计划任务
+
+即使 exe 搬出了工作区，**从宿主进程树里 `spawn` 出来的子进程**依旧可能在 `EnsureCoreWebView2Async`
+处吃 `E_ACCESSDENIED`。改用 Task Scheduler 服务创建进程则拿到干净的用户令牌，WebView2 正常初始化。
+所以插件不直接 `spawn` 小窗，而是 `schtasks /Create /XML … /TN DshMiniWindow` 再 `/Run`。
+
+任务是用 **XML** 建的，不是 `/SC ONCE` 那套开关 —— 因为命令行开关建出来的任务默认
+`DisallowStartIfOnBatteries=true`，笔记本在用电池时任务只会停在 `Status: Queued`，exe 根本不启动
+（踩过：窗口"点了没反应"，`schtasks /Query` 里是 Queued）。XML 里显式写：
+
+```xml
+<Settings>
+  <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+  <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
+</Settings>
+<Triggers><TimeTrigger Enabled="false"><StartBoundary>2099-12-31T23:59:00</StartBoundary></TimeTrigger></Triggers>
+```
+
+触发开关是 `Enabled="false"` + 2099 年，所以它永远不会自己弹窗，只有点「弹出此窗口」时被手动 `Run`。
+每次打开都 `/F` 覆盖创建，指向当前安装路径；普通用户即可创建，不需要管理员权限。
+如果所在机器禁止创建计划任务，插件会回退成直接 `spawn`（受限情况下 WebView2 可能起不来）。
+
+后台服务（划词药丸、全局热键）不需要 WebView2，用的是同名机制的 `DshMiniWindowService` 任务
+（同样 XML、同样 2099 触发），这样它也能读到鼠标钩子。
+
+卸载插件不会删除这两个任务（npm 卸载没有钩子），需要时手工清掉：
 
 ```powershell
 schtasks /Delete /TN DshMiniWindow /F
+schtasks /Delete /TN DshMiniWindowService /F
 ```
 排查时看 `app\bin\data\hud.log`，正常应该是：
 
@@ -313,5 +363,10 @@ wv2: ready
   「选中后 Ctrl+C 复制不上」的根因。
 * 主题色与小窗边框：导航完成后同步两次，另外每 6 秒复查一次页面背景色；
   跨显示器拖到不同 DPI 的屏会收到 `WM_DPICHANGED` 并重算标题条/图标/最小尺寸。
+* **DSH 自己的窗口里不会弹药丸**（有意如此，不做）：主窗是 Electron/Chromium，`Chrome_WidgetWin_1`
+  在辅助功能没激活时不暴露文本（实测 `textFound=True` 但 `uia raw=0`），只剩合成 `Ctrl+C` 这一档，
+  而它会和页面自己的复制粘贴抢剪贴板。真要支持，正路是在 `lib/client.js` 里监听页面内
+  `selectionchange` + 自绘药丸（`dsh-selection-explain` 就是这么做的）——那是另一个功能，不混进本插件。
+* 药丸对小窗和它自己免疫（`OverOwnWindows`），所以在小窗内部划词也不会弹。
 * 标题条图标是 `Segoe MDL2 Assets` 字体，字号偏小（E8BB 关闭键取 8.5f 才和其它图标一样大）。
 

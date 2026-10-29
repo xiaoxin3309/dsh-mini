@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -28,6 +28,35 @@ namespace DshHud
 
         [DllImport("user32.dll")]
         internal static extern short GetAsyncKeyState(int vKey);
+
+        // Low-level mouse hook. Preferred over polling GetAsyncKeyState: this process
+        // can be started with a token whose async key state reads always come back
+        // empty, and then a poll-based watch silently never fires.
+        internal delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc proc, IntPtr hMod, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MSLLHOOKSTRUCT
+        {
+            public int X;
+            public int Y;
+            public uint MouseData;
+            public uint Flags;
+            public uint Time;
+            public UIntPtr ExtraInfo;
+        }
+
+        internal const int WH_MOUSE_LL = 14;
+        internal const int WM_LBUTTONDOWN = 0x0201;
+        internal const int WM_LBUTTONUP = 0x0202;
 
         [DllImport("user32.dll")]
         internal static extern IntPtr WindowFromPoint(POINT p);
@@ -94,6 +123,15 @@ namespace DshHud
         internal static bool IsMouseDown()
         {
             return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        }
+
+        /// <summary>Diagnostics: which of L/R/M the OS reports as held, plus the raw state.</summary>
+        internal static string HeldButtons()
+        {
+            int l = GetAsyncKeyState(VK_LBUTTON);
+            int r = GetAsyncKeyState(0x02);
+            int m = GetAsyncKeyState(0x04);
+            return l.ToString("X4") + "/" + r.ToString("X4") + "/" + m.ToString("X4");
         }
 
         internal static bool IsKeyDown(int vk)
@@ -205,7 +243,10 @@ namespace DshHud
             try
             {
                 IntPtr root = RootWindowAt(p);
-                if (root == IntPtr.Zero) return true;
+                // An unknown window is not a shell surface: treating it as one silently
+                // swallowed every selection made over a window we could not resolve
+                // (Notepad's WinUI island was the first report of this).
+                if (root == IntPtr.Zero) return false;
                 StringBuilder sb = new StringBuilder(256);
                 if (GetClassName(root, sb, sb.Capacity) <= 0) return false;
                 string cls = sb.ToString().ToLowerInvariant();
@@ -220,6 +261,55 @@ namespace DshHud
             catch
             {
                 return false;
+            }
+        }
+
+        /** Class name of a window handle, for diagnostics and the shell test. */
+        internal static string ClassName(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return "none";
+                StringBuilder sb = new StringBuilder(256);
+                if (GetClassName(h, sb, sb.Capacity) <= 0) return "?";
+                return sb.ToString();
+            }
+            catch
+            {
+                return "err";
+            }
+        }
+
+        /**
+         * Explorer, the desktop and the taskbar interpret Ctrl+C as "copy the selected
+         * files", so they must never receive our synthetic copy.
+         */
+        internal static bool IsShellClass(IntPtr h)
+        {
+            string cls = ClassName(h).ToLowerInvariant();
+            return cls == "progman"
+                || cls == "workerw"
+                || cls == "shell_traywnd"
+                || cls == "shell_secondarytraywnd"
+                || cls == "cabinetwclass"
+                || cls == "explorewclass"
+                || cls == "desktopwindowxamlsource";
+        }
+
+        /** Class name of the root window under a point, for the trace log. */
+        internal static string ClassAt(Point p)
+        {
+            try
+            {
+                IntPtr root = RootWindowAt(p);
+                if (root == IntPtr.Zero) return "none";
+                StringBuilder sb = new StringBuilder(256);
+                if (GetClassName(root, sb, sb.Capacity) <= 0) return "?";
+                return sb.ToString() + "#" + root;
+            }
+            catch
+            {
+                return "err";
             }
         }
 
@@ -344,11 +434,22 @@ namespace DshHud
             SelectionHit hit = new SelectionHit();
             hit.Text = "";
 
+            bool trace = TraceIO();
             try
             {
                 AutomationElement el = hwnd != IntPtr.Zero ? AutomationElement.FromHandle(hwnd) : null;
                 if (el == null) el = AutomationElement.FocusedElement;
                 AutomationElement text = FindTextElement(el, 0);
+                if (trace)
+                {
+                    string name = "?";
+                    int kids = -1;
+                    try { name = el == null ? "null" : el.Current.ControlType.ProgrammaticName + ":" + el.Current.ClassName + ":" + el.Current.Name; }
+                    catch { }
+                    try { if (text != null) { AutomationElementCollection c = text.FindAll(TreeScope.Children, Condition.TrueCondition); kids = c.Count; } }
+                    catch { }
+                    SelectionWatcher.Log("uia hwnd=" + hwnd + " el=" + name + " textFound=" + (text != null) + " kids=" + kids);
+                }
                 if (text != null)
                 {
                     object pattern;
@@ -356,9 +457,12 @@ namespace DshHud
                     {
                         TextPattern tp = (TextPattern)pattern;
                         TextPatternRange[] ranges = tp.GetSelection();
+                        int count = ranges == null ? 0 : ranges.Length;
+                        if (trace) SelectionWatcher.Log("uia ranges=" + count);
                         if (ranges != null && ranges.Length > 0)
                         {
                             string text2 = ranges[0].GetText(-1);
+                            if (trace) SelectionWatcher.Log("uia raw=" + (text2 == null ? -1 : text2.Length));
                             if (!string.IsNullOrEmpty(text2))
                             {
                                 hit.Text = Normalize(text2);
@@ -381,14 +485,32 @@ namespace DshHud
                             }
                         }
                     }
+                    else if (trace)
+                    {
+                        SelectionWatcher.Log("uia no TextPattern");
+                    }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                if (trace) SelectionWatcher.Log("uia threw " + ex.GetType().Name + ": " + ex.Message);
             }
 
             if (ClipboardFallback) hit.Text = Read();
             return hit;
+        }
+
+        /** Enabled by dropping poll.txt next to hud.log; keeps the UIA path honest. */
+        private static bool TraceIO()
+        {
+            try
+            {
+                return System.IO.File.Exists(System.IO.Path.Combine(HudConfig.Dir, "uia.txt"));
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         internal static SelectionHit ReadHit()
@@ -759,9 +881,14 @@ namespace DshHud
         private int downTick;
         private int lastClickTick;
         private int shownTick;
+        private int pollTicks;
         private int probeId;
         private bool enabled = true;
         private string text = "";
+
+        // The hook delegate must stay rooted for as long as the hook exists.
+        private readonly ShellWin.LowLevelMouseProc hookProc;
+        private IntPtr hook;
 
         internal SelectionWatcher(Form host)
         {
@@ -775,6 +902,78 @@ namespace DshHud
             timer.Interval = 90;
             timer.Tick += Poll;
             timer.Start();
+
+            // Event driven watch. Polling stays as a fallback for hosts where the
+            // hook cannot be installed.
+            hookProc = OnMouseHook;
+            hook = ShellWin.SetWindowsHookEx(ShellWin.WH_MOUSE_LL, hookProc, IntPtr.Zero, 0);
+            if (hook == IntPtr.Zero)
+                Log("hook failed err=" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            else
+                Log("hook installed");
+        }
+
+        private IntPtr OnMouseHook(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (nCode >= 0)
+                {
+                    int msg = wParam.ToInt32();
+                    if (msg == ShellWin.WM_LBUTTONDOWN || msg == ShellWin.WM_LBUTTONUP)
+                    {
+                        ShellWin.MSLLHOOKSTRUCT info = (ShellWin.MSLLHOOKSTRUCT)
+                            System.Runtime.InteropServices.Marshal.PtrToStructure(lParam, typeof(ShellWin.MSLLHOOKSTRUCT));
+                        Point pt = new Point(info.X, info.Y);
+                        if (msg == ShellWin.WM_LBUTTONDOWN) OnHookDown(pt);
+                        else OnHookUp(pt);
+                    }
+                }
+            }
+            catch
+            {
+                // A throwing hook would be silently removed by Windows mid-session.
+            }
+            return ShellWin.CallNextHookEx(hook, nCode, wParam, lParam);
+        }
+
+        private void OnHookDown(Point p)
+        {
+            int now = Environment.TickCount;
+            if (button.Visible && !button.Bounds.Contains(p)) HideButton();
+            down = true;
+            downPt = p;
+            downTick = now;
+            if (TraceOn()) Log("hook down at " + p.X + "," + p.Y);
+        }
+
+        private void OnHookUp(Point p)
+        {
+            int now = Environment.TickCount;
+            if (!down) return;
+            down = false;
+            int elapsed = now - downTick;
+            int dist = Math.Abs(p.X - downPt.X) + Math.Abs(p.Y - downPt.Y);
+
+            if (elapsed < 8000 && dist >= U(6))
+            {
+                if (!OverOwnWindows(p)) Kick(p, 130);
+            }
+            else if (dist < U(4))
+            {
+                bool second = now - lastClickTick < 520
+                    && Math.Abs(p.X - lastClickPt.X) < U(24)
+                    && Math.Abs(p.Y - lastClickPt.Y) < U(24);
+                if (second && !OverOwnWindows(p)) Kick(p, 320);
+                lastClickTick = now;
+                lastClickPt = p;
+            }
+        }
+
+        private bool TraceOn()
+        {
+            try { return System.IO.File.Exists(System.IO.Path.Combine(HudConfig.Dir, "poll.txt")); }
+            catch { return false; }
         }
 
         internal bool Enabled
@@ -789,6 +988,14 @@ namespace DshHud
 
         public void Dispose()
         {
+            try
+            {
+                if (hook != IntPtr.Zero) ShellWin.UnhookWindowsHookEx(hook);
+                hook = IntPtr.Zero;
+            }
+            catch
+            {
+            }
             try
             {
                 timer.Stop();
@@ -826,11 +1033,30 @@ namespace DshHud
             Point p = Cursor.Position;
             bool isDown = ShellWin.IsMouseDown();
 
+            // Diagnostics switch: drop `poll.txt` next to hud.log to trace the watch.
+            // Off by default so a healthy session does not spam the log.
+            pollTicks++;
+            bool tracing = false;
+            try { tracing = System.IO.File.Exists(System.IO.Path.Combine(HudConfig.Dir, "poll.txt")); }
+            catch { }
+            if (tracing && pollTicks % 10 == 0)
+                Log("poll alive ticks=" + pollTicks + " down=" + isDown + " ks=" + ShellWin.IsMouseDown() +
+                    " held=" + ShellWin.HeldButtons() + " p=" + p.X + "," + p.Y + " fg=" + ShellWin.GetForegroundWindow());
+
+            // With a live hook the button state arrives as events; polling would double
+            // fire. Keep only the pill timeout in that case.
+            if (hook != IntPtr.Zero)
+            {
+                if (button.Visible && now - shownTick > 9000) HideButton();
+                return;
+            }
+
             if (isDown && !down)
             {
                 down = true;
                 downPt = p;
                 downTick = now;
+                if (tracing) Log("poll down at " + p.X + "," + p.Y);
                 if (button.Visible && !button.Bounds.Contains(p)) HideButton();
             }
             else if (!isDown && down)
@@ -838,6 +1064,7 @@ namespace DshHud
                 down = false;
                 int elapsed = now - downTick;
                 int dist = Math.Abs(p.X - downPt.X) + Math.Abs(p.Y - downPt.Y);
+                if (tracing) Log("poll up dist=" + dist + " elapsed=" + elapsed + " own=" + OverOwnWindows(p));
 
                 if (elapsed < 8000 && dist >= U(6))
                 {
@@ -881,12 +1108,22 @@ namespace DshHud
             // selection: probing it races the user's own shortcut.
             if (ShellWin.IsModifierDown()) { Log("skip: modifier down"); return; }
 
-            if (ShellWin.IsShellSurfaceAt(pt)) { Log("skip: shell surface"); return; }
-            int id = ++probeId;
-            bool terminal = ShellWin.IsTerminalAt(pt);
+            // Judge by the app the user is working in, not by what sits under the cursor:
+            // WindowFromPoint reports Progman/WorkerW for WinUI windows (Notepad, Settings,
+            // Snipping Tool…) because their content lives in a separate composition island,
+            // so a position-based shell test silently dropped every selection made there.
             IntPtr root = ShellWin.RootWindowAt(pt);
-            if (ShellWin.IsGameWindow(root)) { Log("skip: game window"); return; }
-            Log("kick at " + pt.X + "," + pt.Y + " terminal=" + terminal + " root=" + root);
+            IntPtr fgNow = ShellWin.GetForegroundWindow();
+            IntPtr subject = fgNow != IntPtr.Zero ? fgNow : root;
+            if (ShellWin.IsShellClass(subject))
+            {
+                Log("skip: shell surface " + ShellWin.ClassName(subject));
+                return;
+            }
+            int id = ++probeId;
+            bool terminal = ShellWin.IsTerminalWindow(subject);
+            if (ShellWin.IsGameWindow(subject)) { Log("skip: game window"); return; }
+            Log("kick at " + pt.X + "," + pt.Y + " fg=" + subject + " root=" + root + " class=" + ShellWin.ClassName(subject) + " underCursor=" + ShellWin.ClassAt(pt));
 
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
@@ -896,11 +1133,10 @@ namespace DshHud
                     if (id != probeId) return;
                     if (terminal) { Log("skip: terminal"); return; }
                     // the user may have switched apps while we waited; never copy there
-                    // prefer whatever the user is actually looking at; the window under the
-                    // cursor may be a stale/overlapped one (explorer behind a maximized app)
                     IntPtr fg = ShellWin.GetForegroundWindow();
                     if (fg != IntPtr.Zero && ShellWin.IsTerminalWindow(fg)) { Log("skip: foreground terminal"); return; }
                     if (ShellWin.IsGameWindow(fg)) { Log("skip: foreground game"); return; }
+                    if (ShellWin.IsShellClass(fg)) { Log("skip: foreground shell " + ShellWin.ClassName(fg)); return; }
 
                     SelectionHit hit = SelectionReader.ReadHit(fg != IntPtr.Zero ? fg : root);
                     if (string.IsNullOrEmpty(hit.Text) && fg != IntPtr.Zero && fg != root)

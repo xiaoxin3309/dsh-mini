@@ -29,7 +29,7 @@
 - **无系统边框**，自绘 32px 标题条：
   - 左：`DSH 小窗 · <会话名>`
   - 右：📷 截图 / 📌 置顶开关 / ✕ 关闭
-- 默认置顶、贴当前显示器右缘；拖动后记住位置（`%LOCALAPPDATA%\dsh-hud\window.json`）
+- 默认置顶、贴当前显示器右缘；拖动后记住位置（`%LOCALAPPDATA%\dsh-mini\bin\data\window.json`）
 - `Esc` 收进托盘；托盘单击唤醒
 - **单实例**：命名 Mutex，重复启动只把新 URL 转发给已开窗口
 - 支持多显示器 + 高 DPI（manifest 声明 PerMonitorV2）
@@ -159,7 +159,7 @@ HUD 标志用 **cookie `dsh_hud=1`**（由壳的 CookieManager 在导航前写�
   （因为 token 登录后 302 会丢掉整个 query），页面侧 `uiWorkspace.openSession(sessionId)` 落到该会话。
 * 按钮链路实测：`POST /dsh-mini/open` → `backend:"native"` → 窗口起来并显示当前会话；
   再点一次只把已有窗口提到前面，不重复开窗。
-* 诊断：`/dsh-mini/trace` 信标 + `%LOCALAPPDATA%\dsh-hud\trace.log`，配合 UI Automation 的 `Invoke`
+* 诊断：`/dsh-mini/trace` 信标 + `%LOCALAPPDATA%\dsh-mini\bin\data\trace.log`，配合 UI Automation 的 `Invoke`
   才定位到「主窗 `location.href` 是 `dsh-app:` 自定义协议，客户端给不出可用地址」这个根因
   —— 最终改成「客户端只给 sessionId，地址由宿主 `webApp.getAdvertisedUrl()` 拼」。
 
@@ -200,7 +200,7 @@ HUD 标志用 **cookie `dsh_hud=1`**（由壳的 CookieManager 在导航前写�
 | 小窗 | \DSH小窗.exe --url …\ | WebView2 窗口、截图、引用落进 composer |
 | 服务 | \DSH小窗.exe --service --url …\ | 90ms 鼠标状态机 + UIA 取选区 + 药丸 + 全局热键 + 托盘 |
 
-两者用文件通信（都在 \%LOCALAPPDATA%\dsh-hud\）：`quote.txt`（划词正文）、`cmd.txt`（\ull\/\egion\）、`pending.txt`（要导航到的 URL）、`config.ini`（设置）。小窗每 700ms 轮询一次，服务每 2.5s 查一次 config 时间戳。
+两者用文件通信（都在 \%LOCALAPPDATA%\dsh-mini\bin\data\）：`quote.txt`（划词正文）、`cmd.txt`（\ull\/\egion\）、`pending.txt`（要导航到的 URL）、`config.ini`（设置）。小窗每 700ms 轮询一次，服务每 2.5s 查一次 config 时间戳。
 
 **选区读取顺序**：UIA `TextPattern.GetSelection()`（能同时拿到文字和选区矩形，无副作用）→ 失败才回退剪贴板（备份 IDataObject → 发 Ctrl+C → 等剪贴板序列号变化 → 还原）。终端窗口与桌面/资源管理器直接跳过，否则 Ctrl+C 会变成 SIGINT 或真的复制文件。
 

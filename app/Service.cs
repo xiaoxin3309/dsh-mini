@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -403,26 +403,14 @@ namespace DshHud
                     Native.SetForegroundWindow(hwnd);
                     return;
                 }
-                // The plugin refreshes request.txt on every pop-out, so prefer it over the
-                // address this helper was started with (it may be from an earlier boot).
-                string fresh = RequestUrl();
-                if (!string.IsNullOrEmpty(fresh)) url = fresh;
-                if (string.IsNullOrEmpty(url))
-                {
-                    SelectionWatcher.Log("spawn skipped: no url");
-                    return;
-                }
-                // Start the shell through Explorer: a direct child would inherit the
-                // restricted token this helper runs under, and WebView2 then fails to
-                // initialise with E_ACCESSDENIED.
-                try
-                {
-                    Process.Start("explorer.exe", "\"" + exePath + "\"");
-                }
-                catch
-                {
-                    Process.Start(exePath, "--url \"" + url + "\" --title \"DSH 小窗\"");
-                }
+                // This helper runs with the restricted token the host gave it, so any
+                // child it starts cannot initialise WebView2 (E_ACCESSDENIED). Ask the
+                // plugin instead: it lives in the host process and launches the window
+                // through Task Scheduler, which yields a clean user token.
+                string want = System.IO.Path.Combine(HudConfig.Dir, "want.txt");
+                System.IO.Directory.CreateDirectory(HudConfig.Dir);
+                System.IO.File.WriteAllText(want, DateTime.Now.ToString("HH:mm:ss"));
+                SelectionWatcher.Log("window requested");
             }
             catch (Exception ex)
             {

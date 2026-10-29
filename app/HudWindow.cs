@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -945,17 +945,33 @@ namespace DshHud
 
         private async void QuoteAsync(string text)
         {
-            try
+            // The page is usable before its composer is: quoting straight after `ready`
+            // hits a DOM with no editor yet, so retry until the editor accepts the text.
+            string script = "(function(){try{return window.__dshHud && window.__dshHud.quote("
+                + "\"" + Escape(text) + "\") ? 'ok' : 'fail';}catch(e){return 'err:' + e.message;}})()";
+            for (int attempt = 0; attempt < 25; attempt++)
             {
-                string script = "(function(){try{return window.__dshHud && window.__dshHud.quote("
-                    + "\"" + Escape(text) + "\") ? 'ok' : 'fail';}catch(e){return 'err:' + e.message;}})()";
-                string result = await web.CoreWebView2.ExecuteScriptAsync(script);
-                Log("quote " + text.Length + " chars -> " + result);
+                try
+                {
+                    if (web == null || web.CoreWebView2 == null) return;
+                    string result = await web.CoreWebView2.ExecuteScriptAsync(script);
+                    if (result == "\"ok\"")
+                    {
+                        Log("quote " + text.Length + " chars -> ok (attempt " + (attempt + 1) + ")");
+                        return;
+                    }
+                    if (attempt == 0 || result != null && result.Contains("err:"))
+                    {
+                        Log("quote " + text.Length + " chars -> " + result + " (retrying)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("quote failed: " + ex.Message);
+                }
+                await System.Threading.Tasks.Task.Delay(400);
             }
-            catch (Exception ex)
-            {
-                Log("quote failed: " + ex.Message);
-            }
+            Log("quote gave up after 25 attempts (" + text.Length + " chars)");
         }
 
         private void Log(string line)
