@@ -102,8 +102,12 @@ PNG → base64 → `postMessage` 给页面 → 走 Lexical 粘贴事件塞进输
 | Windows PowerShell 5.1 | 系统自带 | 只在浏览器回退模式（`backend:"edge"`）和 `scripts/native-status.ps1` 查进程时用；原生模式下截图/划词全是 C# |
 | 剪贴板、全局热键 | 用户权限 | 划词读选区用的 UIA/`Ctrl+C` 走当前用户桌面；管理员窗口（UIPI）里的选区读不到，这是 Windows 的限制 |
 
-数据目录固定是 `%LOCALAPPDATA%\dsh-hud\`（`config.ini`、`window.txt`、日志、WebView2 用户数据），
-改名前后没动过，装到别的机器上也是这个路径、按用户隔离。
+运行时数据在 **`<插件目录>\app\bin\data\`**（`config.ini`、`window.txt`、`hud.log`、`request.txt`、
+WebView2 用户数据），和 exe 放在一起、按用户隔离。之所以不再放 `%LOCALAPPDATA%\dsh-hud\`：
+
+宿主进程树下派生的子进程可能带着受限令牌，连用户目录都写不了（`0x80070005`），
+而 exe 自己的目录一定可写；数据一旦落在用户目录，小窗连日志都写不出来。
+`config.ini` 首次运行时会从旧位置自动搬过来，老用户不用手工迁移。
 
 ## 安装
 
@@ -236,7 +240,7 @@ DSH小窗.exe --service --url <tokenized>    # Mutex Local\DshHudService，单�
   完全不碰剪贴板、不发按键；打开后老式控件才读得到，代价是可能和自己按的 `Ctrl+C` 抢剪贴板）；
 * 全屏截图快捷键、框选截图快捷键（失焦即保存）。
 
-配置落在 `%LOCALAPPDATA%\dsh-hud\config.ini`（`key=value`，C# 壳、宿主插件、客户端三边都读），
+配置落在 `<插件目录>\app\bin\data\config.ini`（`key=value`，C# 壳、宿主插件、客户端三边都读），
 服务每 2.5 秒看一次文件时间戳，改完约 3 秒内生效并重新注册热键。
 
 ## 打包与分发
@@ -261,6 +265,39 @@ cd ..;  npm pack             # → dsh-mini-0.1.0.tgz（约 600 KB）
 * exe 文件名是用码点拼的（`'DSH' + [char]0x5C0F + [char]0x7A97`），故意不写中文字面量：
   这个脚本一旦丢掉 BOM，powershell 5.1 会按 GBK 解析，字面量就会变成 `DSH灏忕獥.exe`（踩过两次）。
 
+### 小窗是怎么被启动的（重要）
+
+插件不直接 `spawn` 小窗 exe，而是先用 `schtasks /Create … /SC ONCE /ST 23:59 /TN DshMiniWindow`
+登记一个一次性计划任务，再 `schtasks /Run` 触发它。
+
+原因是宿主进程树里派生的子进程会继承一个受限令牌/作业对象，这种进程里 `EnsureCoreWebView2Async`
+必然失败并报 `E_ACCESSDENIED 0x80070005`（表现是「WebView2 初始化失败：拒绝访问」）。
+交给 Task Scheduler 服务去创建进程，拿到的是干净的用户令牌，WebView2 就能正常初始化。
+任务名固定为 `DshMiniWindow`，一次性、定时 23:59，平时不会自己触发；重装插件会覆盖同名任务。
+后台服务（划词药丸、全局热键）不需要 WebView2，仍然直接启动，不受影响。
+
+计划任务的触发时间固定在 **2099/12/31 23:59**，所以它永远不会自己弹窗，只有点「弹出此窗口」时才会被手动 `Run`；
+每次打开都会 `/F` 覆盖创建一遍，因此换了安装路径、重装了插件都不会指向旧的 exe。普通用户账户即可创建，
+不需要管理员权限。如果所在机器的组策略禁止创建计划任务，插件会回退成直接 `spawn`（受限令牌下 WebView2 可能初始化失败）。
+
+卸载插件不会删除这个任务（npm 卸载没有钩子），需要时手工清掉：
+
+```powershell
+schtasks /Delete /TN DshMiniWindow /F
+```
+排查时看 `app\bin\data\hud.log`，正常应该是：
+
+```
+wv2: begin
+wv2: udf writable=…\app\bin\data\webview2
+wv2: env ok 151.x
+wv2: ensured
+wv2: ready
+```
+
+如果停在 `wv2: FAIL UnauthorizedAccessException 0x80070005`，说明这次进程是直连启动的
+（计划任务创建失败，插件回退到了 `spawn`），检查 `schtasks /Query /TN DshMiniWindow` 是否还在、
+以及当前账户有没有创建计划任务的权限（普通用户默认可以建自己的任务）。
 ## 已知边界
 
 * 仅 Windows；依赖系统 WebView2 Runtime（Win10/11 一般自带）。

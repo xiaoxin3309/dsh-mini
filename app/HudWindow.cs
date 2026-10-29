@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -177,9 +177,7 @@ namespace DshHud
             this.startUrl = url;
             this.mutex = mutex;
 
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
-            Directory.CreateDirectory(dir);
+            string dir = HudConfig.Dir;
             pendingPath = Path.Combine(dir, "pending.txt");
             statePath = Path.Combine(dir, "window.txt");
             askFlagPath = Path.Combine(dir, "ask.txt");
@@ -468,11 +466,43 @@ namespace DshHud
         {
             try
             {
-                string udf = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud", "webview2");
-                Directory.CreateDirectory(udf);
-                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, udf, null);
+                Log("wv2: begin");
+                string[] udfs = new string[]
+                {
+                    Path.Combine(HudConfig.Dir, "webview2"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud", "webview2"),
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "webview2"),
+                    Path.Combine(Path.GetTempPath(), "dsh-mini-webview2")
+                };
+                // The sandboxed spawn used by the plugin can deny writes to %LOCALAPPDATA%,
+                // so pick the first folder we can actually write into before handing it to
+                // WebView2 - a denied user data folder fails with E_ACCESSDENIED.
+                string chosenUdf = null;
+                foreach (string cand in udfs)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(cand);
+                        string probe = Path.Combine(cand, ".write-probe");
+                        File.WriteAllText(probe, "ok");
+                        File.Delete(probe);
+                        chosenUdf = cand;
+                        Log("wv2: udf writable=" + cand);
+                        break;
+                    }
+                    catch (Exception exProbe)
+                    {
+                        Log("wv2: udf not writable " + cand + " -> " + exProbe.GetType().Name + " 0x" + exProbe.HResult.ToString("X8"));
+                    }
+                }
+                if (chosenUdf == null)
+                {
+                    throw new InvalidOperationException("no writable user data folder");
+                }
+                CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, chosenUdf, null);
+                Log("wv2: env ok " + env.BrowserVersionString);
                 await web.EnsureCoreWebView2Async(env);
+                Log("wv2: ensured");
 
                 web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                 web.CoreWebView2.Settings.IsStatusBarEnabled = false;
@@ -496,9 +526,11 @@ namespace DshHud
 
                 web.CoreWebView2.Navigate(startUrl);
                 ready = true;
+                Log("wv2: ready");
             }
             catch (Exception ex)
             {
+                Log("wv2: FAIL " + ex.GetType().Name + " 0x" + ex.HResult.ToString("X8") + " :: " + ex.Message);
                 MessageBox.Show("WebView2 \u521D\u59CB\u5316\u5931\u8D25\uFF1A" + ex.Message,
                     "DSH \u5C0F\u7A97", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -928,10 +960,25 @@ namespace DshHud
 
         private void Log(string line)
         {
+            string text = DateTime.Now.ToString("HH:mm:ss") + " " + line + "\r\n";
             try
             {
                 string logPath = Path.Combine(Path.GetDirectoryName(pendingPath), "hud.log");
-                File.AppendAllText(logPath, DateTime.Now.ToString("HH:mm:ss") + " " + line + "\r\n", Encoding.UTF8);
+                File.AppendAllText(logPath, text, Encoding.UTF8);
+            }
+            catch
+            {
+            }
+            try
+            {
+                File.AppendAllText(Path.Combine(Path.GetTempPath(), "dsh-mini-hud.log"), text, Encoding.UTF8);
+            }
+            catch
+            {
+            }
+            try
+            {
+                File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "hud-bin.log"), text, Encoding.UTF8);
             }
             catch
             {
@@ -1194,11 +1241,58 @@ namespace DshHud
 
     internal static class Program
     {
+        private static void Diag(string tag)
+        {
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "hud-bin.log");
+            StringBuilder sb = new StringBuilder();
+            try
+            {
+                sb.Append(DateTime.Now.ToString("HH:mm:ss")).Append(" DIAG ").Append(tag);
+                System.Security.Principal.WindowsIdentity wi = System.Security.Principal.WindowsIdentity.GetCurrent();
+                sb.Append(" user=").Append(wi.Name).Append(" groups=").Append(wi.Groups.Count);
+                foreach (System.Security.Principal.IdentityReference g in wi.Groups)
+                {
+                    string v = g.Value;
+                    if (v.StartsWith("S-1-16-") || v.Contains("Codex") || v.StartsWith("S-1-5-21") == false) continue;
+                }
+                sb.Append(" il=");
+                try { sb.Append(wi.Owner.Value); } catch { }
+                string probe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud", "diag-" + System.Guid.NewGuid().ToString("N") + ".txt");
+                try
+                {
+                    File.WriteAllText(probe, "x");
+                    sb.Append(" appdata=OK");
+                    try { File.Delete(probe); } catch { }
+                }
+                catch (Exception exw)
+                {
+                    sb.Append(" appdata=FAIL ").Append(exw.GetType().Name).Append(" 0x").Append(exw.HResult.ToString("X8")).Append(" :: ").Append(exw.Message);
+                }
+                string tprobe = Path.Combine(Path.GetTempPath(), "dsh-mini-diag.txt");
+                try
+                {
+                    File.AppendAllText(tprobe, DateTime.Now + " " + tag + "\r\n");
+                    sb.Append(" temp=OK");
+                }
+                catch (Exception exw2)
+                {
+                    sb.Append(" temp=FAIL 0x").Append(exw2.HResult.ToString("X8"));
+                }
+                sb.Append(" tempdir=").Append(Path.GetTempPath());
+            }
+            catch (Exception ex)
+            {
+                sb.Append(" DIAG-ERR ").Append(ex.Message);
+            }
+            try { File.AppendAllText(path, sb.ToString() + "\r\n", Encoding.UTF8); } catch { }
+        }
+
         [STAThread]
         private static void Main(string[] argv)
         {
             try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
             catch { }
+            Diag("start");
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -1239,6 +1333,21 @@ namespace DshHud
                                      " head=" + head.Replace("\n", " ").Replace("\r", " "));
                 return;
             }
+            // Launched through Explorer (no argv): the plugin asks for the background helper
+            // by dropping this flag file, because a shortcut would raise a security prompt.
+            if (!service)
+            {
+                try
+                {
+                    string svcFlag = Path.Combine(HudConfig.Dir, "service.flag");
+                    if (File.Exists(svcFlag))
+                    {
+                        File.Delete(svcFlag);
+                        service = true;
+                    }
+                }
+                catch { }
+            }
             if (service)
             {
                 // One background helper: it owns the selection pill and the global hotkeys,
@@ -1254,6 +1363,24 @@ namespace DshHud
                 return;
             }
 
+            if (string.IsNullOrEmpty(url))
+            {
+                // Launched without arguments (for example from a shortcut so the process gets
+                // a normal token): the plugin drops the address it wants into request.txt.
+                try
+                {
+                    string reqPath = Path.Combine(HudConfig.Dir, "request.txt");
+                    if (File.Exists(reqPath))
+                    {
+                        foreach (string line in File.ReadAllLines(reqPath, Encoding.UTF8))
+                        {
+                            string cand = line.Trim();
+                            if (cand.StartsWith("http://") || cand.StartsWith("https://")) { url = cand; break; }
+                        }
+                    }
+                }
+                catch { }
+            }
             if (string.IsNullOrEmpty(url))
             {
                 MessageBox.Show("\u7F3A\u5C11 --url \u53C2\u6570\u3002", "DSH \u5C0F\u7A97",
@@ -1279,9 +1406,7 @@ namespace DshHud
                 return;
             }
 
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
-            Directory.CreateDirectory(dir);
+            string dir = HudConfig.Dir;
             string pending = Path.Combine(dir, "pending.txt");
 
             bool created;

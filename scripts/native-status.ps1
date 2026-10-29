@@ -34,8 +34,14 @@ function Find-HudWindow {
     $proc = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
     if ($proc -and $proc.MainWindowHandle -ne 0) { return $proc }
   }
-  # A shell without a main window (minimised to tray) still counts as running.
-  if ($procs.Count -gt 0) { return Get-Process -Id $procs[0].ProcessId -ErrorAction SilentlyContinue }
+  # A shell hidden to the tray keeps its window object; the helper has no window at all.
+  if ($procs.Count -gt 0) {
+    foreach ($item in $procs) {
+      $proc = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+      if ($proc -and $proc.MainWindowTitle -eq '') { continue }
+      if ($proc) { return $proc }
+    }
+  }
   return $null
 }
 

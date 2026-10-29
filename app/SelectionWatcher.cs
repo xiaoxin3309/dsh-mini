@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -863,7 +863,7 @@ namespace DshHud
             try
             {
                 string dir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
+                    HudConfig.Dir);
                 System.IO.Directory.CreateDirectory(dir);
                 System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "hud.log"),
                     DateTime.Now.ToString("HH:mm:ss") + " [pill] " + line + "\r\n",

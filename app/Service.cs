@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -34,9 +34,29 @@ namespace DshHud
         {
             get
             {
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
-                Directory.CreateDirectory(dir);
+                // Keep every file next to the executable: a process launched by the plugin
+                // can run under a restricted token that is denied writes to %LOCALAPPDATA%,
+                // which broke the WebView2 profile and the window <-> service IPC files.
+                string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                catch
+                {
+                    dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
+                    Directory.CreateDirectory(dir);
+                }
+                try
+                {
+                    string legacy = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "dsh-hud");
+                    string oldCfg = Path.Combine(legacy, "config.ini");
+                    string newCfg = Path.Combine(dir, "config.ini");
+                    if (File.Exists(oldCfg) && !File.Exists(newCfg)) File.Copy(oldCfg, newCfg, false);
+                }
+                catch { }
                 return dir;
             }
         }
@@ -235,14 +255,32 @@ namespace DshHud
         private readonly NotifyIcon tray;
         private readonly ToolStripMenuItem askItem;
         private readonly string exePath;
-        private readonly string url;
+        private string url;
         private HudConfig config;
         private long configStamp;
         private readonly System.Windows.Forms.Timer configTimer;
 
+        internal static string RequestUrl()
+        {
+            try
+            {
+                string reqPath = Path.Combine(HudConfig.Dir, "request.txt");
+                if (File.Exists(reqPath))
+                {
+                    foreach (string line in File.ReadAllLines(reqPath, Encoding.UTF8))
+                    {
+                        string cand = line.Trim();
+                        if (cand.StartsWith("http://") || cand.StartsWith("https://")) return cand;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         internal SelectionService(string url)
         {
-            this.url = url;
+            this.url = string.IsNullOrEmpty(url) ? RequestUrl() : url;
             exePath = Application.ExecutablePath;
             config = HudConfig.Load();
             configStamp = HudConfig.Stamp();
@@ -365,12 +403,26 @@ namespace DshHud
                     Native.SetForegroundWindow(hwnd);
                     return;
                 }
+                // The plugin refreshes request.txt on every pop-out, so prefer it over the
+                // address this helper was started with (it may be from an earlier boot).
+                string fresh = RequestUrl();
+                if (!string.IsNullOrEmpty(fresh)) url = fresh;
                 if (string.IsNullOrEmpty(url))
                 {
                     SelectionWatcher.Log("spawn skipped: no url");
                     return;
                 }
-                Process.Start(exePath, "--url \"" + url + "\" --title \"DSH 小窗\"");
+                // Start the shell through Explorer: a direct child would inherit the
+                // restricted token this helper runs under, and WebView2 then fails to
+                // initialise with E_ACCESSDENIED.
+                try
+                {
+                    Process.Start("explorer.exe", "\"" + exePath + "\"");
+                }
+                catch
+                {
+                    Process.Start(exePath, "--url \"" + url + "\" --title \"DSH 小窗\"");
+                }
             }
             catch (Exception ex)
             {

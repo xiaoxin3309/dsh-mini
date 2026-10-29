@@ -11,3 +11,10 @@ app/vendor/
 region-*.png
 region-overlay*.png
 *.pdb
+
+# runtime state written next to the exe
+app/bin/data/
+app/bin/hud-bin.log
+
+# ad-hoc test captures
+after-reboot-window.png
