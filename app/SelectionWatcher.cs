@@ -79,6 +79,15 @@ namespace DshHud
         [DllImport("user32.dll")]
         internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 
+        [DllImport("user32.dll")]
+        internal static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+        [DllImport("user32.dll")]
+        internal static extern int GetWindowLong(IntPtr hWnd, int index);
+
+        internal const int GWL_EXSTYLE = -20;
+        internal const int WS_EX_TOPMOST = 0x00000008;
+
         internal const uint GA_ROOT = 2;
         internal const int VK_LBUTTON = 0x01;
         internal const int VK_SHIFT = 0x10;
@@ -354,6 +363,103 @@ namespace DshHud
             return false;
         }
 
+        /// <summary>Lower-case process name (no extension) behind a window handle.</summary>
+        internal static string ProcessNameOf(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return "";
+                IntPtr root = GetAncestor(h, GA_ROOT);
+                if (root == IntPtr.Zero) root = h;
+                uint pid;
+                GetWindowThreadProcessId(root, out pid);
+                if (pid == 0) return "";
+                return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        /**
+         * Dedicated capture utilities. They never host selectable text, so the pill has
+         * nothing to find there and every probe is pure downside: the Ctrl+C fallback is
+         * a real keystroke, and capture tools bind Ctrl+C to "confirm and copy". That is
+         * what closed PixPin's overlay the instant the region was dragged out, so the
+         * toolbar the user wanted to pick from never appeared.
+         */
+        private static readonly string[] CaptureTools = new string[]
+        {
+            "pixpin", "snipaste", "snippingtool", "screensketch", "snipandsketch",
+            "sharex", "greenshot", "fscapture", "faststone capture", "lightshot",
+            "flameshot", "picpick", "hypersnap", "snipastex"
+        };
+
+        /**
+         * A window that fills its monitor and floats above everything is an overlay:
+         * a screenshot canvas, a HUD drawn by the capture tool, a full-screen video.
+         * None of those is a text surface, and the ones that are capture canvases treat
+         * a stray Ctrl+C as "accept". Apps that do screenshots *and* host text (WeChat,
+         * QQ, Snipping Tool) are only skipped while that overlay is up, so quoting a
+         * chat message still works.
+         *
+         * The "问大肥鱼" pill and the small window are topmost too, but they are tiny,
+         * so the coverage test keeps them out of this.
+         */
+        internal static bool IsOverlayWindow(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return false;
+                IntPtr root = GetAncestor(h, GA_ROOT);
+                if (root == IntPtr.Zero) root = h;
+                if ((GetWindowLong(root, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) return false;
+
+                RECT r;
+                if (!GetWindowRect(root, out r)) return false;
+                int w = r.right - r.left;
+                int hgt = r.bottom - r.top;
+                if (w <= 0 || hgt <= 0) return false;
+
+                Rectangle bounds = Screen.FromRectangle(new Rectangle(r.left, r.top, w, hgt)).Bounds;
+                return w >= bounds.Width * 0.92 && hgt >= bounds.Height * 0.92;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /**
+         * True when the window under the user's work belongs to a screenshot flow.
+         * Those are never probed: not with UIA, and above all not with a synthetic
+         * Ctrl+C.
+         */
+        internal static bool IsCaptureSurface(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return false;
+                IntPtr root = GetAncestor(h, GA_ROOT);
+                if (root == IntPtr.Zero) root = h;
+
+                string name = ProcessNameOf(root);
+                if (name.Length > 0)
+                {
+                    foreach (string tool in CaptureTools)
+                    {
+                        if (name == tool || name.IndexOf(tool, StringComparison.Ordinal) >= 0) return true;
+                    }
+                }
+                return IsOverlayWindow(root);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// Ask the focused control to copy through WM_COPY. This is the polite fallback:
         /// no keystrokes are synthesised, so a real Ctrl+C pressed by the user is never
@@ -433,6 +539,15 @@ namespace DshHud
         {
             SelectionHit hit = new SelectionHit();
             hit.Text = "";
+
+            // Never touch a screenshot canvas. Not for UIA and above all not for the
+            // Ctrl+C fallback: capture tools bind Ctrl+C to "accept the region", so a
+            // probe there closes the overlay before the user can pick copy / OCR / pin.
+            if (ShellWin.IsCaptureSurface(hwnd != IntPtr.Zero ? hwnd : ShellWin.GetForegroundWindow()))
+            {
+                SelectionWatcher.Log("skip: capture surface " + ShellWin.ProcessNameOf(hwnd));
+                return hit;
+            }
 
             bool trace = TraceIO();
             try
@@ -594,8 +709,11 @@ namespace DshHud
 
             // A real key chord is the only thing that works for Chromium content and
             // legacy controls. Only when the user has opted in, and never while they
-            // are holding a modifier themselves.
+            // are holding a modifier themselves. Re-checked here because the probe
+            // thread may run a moment after the decision to kick was made: if the user
+            // already opened a screenshot canvas, our keystroke would accept it.
             if (!ClipboardFallback || ShellWin.IsModifierDown()) return "";
+            if (ShellWin.IsCaptureSurface(ShellWin.GetForegroundWindow())) return "";
             try
             {
                 ShellWin.SendCopy();
@@ -1118,6 +1236,15 @@ namespace DshHud
             if (ShellWin.IsShellClass(subject))
             {
                 Log("skip: shell surface " + ShellWin.ClassName(subject));
+                return;
+            }
+            // A screenshot canvas is never a text surface. Checked before anything else
+            // looks at it: the drag that ends a capture is exactly the gesture that
+            // reaches here, and a probe would accept the region instead of letting the
+            // user pick copy / OCR / pin from the toolbar.
+            if (ShellWin.IsCaptureSurface(subject) || ShellWin.IsCaptureSurface(root))
+            {
+                Log("skip: capture surface " + ShellWin.ProcessNameOf(subject) + " " + ShellWin.ClassName(subject));
                 return;
             }
             int id = ++probeId;

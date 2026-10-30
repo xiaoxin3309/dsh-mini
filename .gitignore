@@ -18,3 +18,6 @@ app/bin/hud-bin.log
 
 # ad-hoc test captures
 after-reboot-window.png
+
+# 本机交接文档，不上传
+HANDOFF.md
