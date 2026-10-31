@@ -460,6 +460,66 @@ namespace DshHud
             }
         }
 
+        /**
+         * Code editors and IDEs. Selecting text there is an editing gesture, not a
+         * reading one: you drag over a line to delete it, shift-click to extend, click
+         * the gutter to take the whole line. The synthetic Ctrl+C is also actively
+         * harmful in that setting — with nothing selected an editor copies the *whole
+         * current line*, so a stray click put a line of code on the clipboard and hung
+         * a pill over the code the user was writing.
+         *
+         * So in those apps we still honour a selection we can read through UI
+         * Automation, but never fall back to the key chord. Editing stays untouched.
+         */
+        private static readonly string[] Editors = new string[]
+        {
+            "code", "code - insiders", "vscodium", "cursor", "windsurf", "trae",
+            "devenv", "idea64", "pycharm64", "goland64", "webstorm64", "clion64",
+            "rider64", "studio64", "datagrip64", "phpstorm64", "rubymine64",
+            "sublime_text", "notepad++", "notepad++64", "zed", "atom", "eclipse",
+            "gvim", "nvim-qt", "emacs", "textpad", "ultraedit"
+        };
+
+        /**
+         * Double-click picks a word in a browser, a chat, a PDF, Word — the reading
+         * gesture the pill exists for. The one family where it must stay out is the
+         * editors above, because there the same gesture is how you grab a symbol and
+         * the gutter takes a whole line on a single click.
+         *
+         * Everything else is left to Kick(), which already knows about shell windows,
+         * capture canvases, terminals and games.
+         */
+        internal static bool DoubleClickWorthProbing(IntPtr h)
+        {
+            return !IsEditorApp(h);
+        }
+
+        /// <summary>True when the window belongs to a code editor / IDE.</summary>
+        internal static bool IsEditorApp(IntPtr h)
+        {
+            try
+            {
+                if (h == IntPtr.Zero) return false;
+                IntPtr root = GetAncestor(h, GA_ROOT);
+                if (root == IntPtr.Zero) root = h;
+
+                string name = ProcessNameOf(root);
+                if (name.Length == 0) return false;
+                // ProcessNameOf returns the bare name; keep ".exe" out of the list.
+                if (name.EndsWith(".exe", StringComparison.Ordinal))
+                    name = name.Substring(0, name.Length - 4);
+                foreach (string app in Editors)
+                {
+                    if (name == app) return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// Ask the focused control to copy through WM_COPY. This is the polite fallback:
         /// no keystrokes are synthesised, so a real Ctrl+C pressed by the user is never
@@ -535,7 +595,7 @@ namespace DshHud
         /// focused element: the helper process often is not the foreground app by the
         /// time we look, and a window can keep a selection while unfocused.
         /// </summary>
-        internal static SelectionHit ReadHit(IntPtr hwnd)
+        internal static SelectionHit ReadHit(IntPtr hwnd, bool allowKeyChord = false)
         {
             SelectionHit hit = new SelectionHit();
             hit.Text = "";
@@ -611,7 +671,7 @@ namespace DshHud
                 if (trace) SelectionWatcher.Log("uia threw " + ex.GetType().Name + ": " + ex.Message);
             }
 
-            if (ClipboardFallback) hit.Text = Read();
+            if (ClipboardFallback) hit.Text = Read(allowKeyChord);
             return hit;
         }
 
@@ -671,12 +731,12 @@ namespace DshHud
             return text;
         }
 
-        internal static string Read()
+        internal static string Read(bool allowKeyChord = false)
         {
             string result = "";
             Thread worker = new Thread(delegate()
             {
-                result = ReadOnStaThread();
+                result = ReadOnStaThread(allowKeyChord);
             });
             worker.SetApartmentState(ApartmentState.STA);
             worker.IsBackground = true;
@@ -685,7 +745,7 @@ namespace DshHud
             return result;
         }
 
-        private static string ReadOnStaThread()
+        private static string ReadOnStaThread(bool allowKeyChord)
         {
             // No clipboard backup/restore any more. Restoring was the actual damage: while
             // we waited for our own copy to land, the user's real Ctrl+C could complete
@@ -714,6 +774,15 @@ namespace DshHud
             // already opened a screenshot canvas, our keystroke would accept it.
             if (!ClipboardFallback || ShellWin.IsModifierDown()) return "";
             if (ShellWin.IsCaptureSurface(ShellWin.GetForegroundWindow())) return "";
+            // `allowKeyChord` is the one deliberate exception: the user clicked the pill
+            // in an editor, so a selection is certainly there and the copy is what they
+            // asked for. Everything that fires on its own stays out of editors.
+            if (!allowKeyChord && ShellWin.IsEditorApp(ShellWin.GetForegroundWindow()))
+            {
+                SelectionWatcher.Log("skip: editor key chord " +
+                    ShellWin.ProcessNameOf(ShellWin.GetForegroundWindow()));
+                return "";
+            }
             try
             {
                 ShellWin.SendCopy();
@@ -982,7 +1051,7 @@ namespace DshHud
 
     /// <summary>
     /// Polls the mouse button (a low-level hook buys nothing here), notices drag-selects
-    /// and double-clicks anywhere on the desktop, reads the selection and offers the pill.
+    /// anywhere on the desktop, reads the selection and offers the pill.
     /// </summary>
     internal sealed class SelectionWatcher : IDisposable
     {
@@ -1003,6 +1072,10 @@ namespace DshHud
         private int probeId;
         private bool enabled = true;
         private string text = "";
+        // An editor pill with nothing read behind it (see Kick): the copy is deferred
+        // until the user actually clicks it.
+        private bool pending;
+        private IntPtr pendingTarget;
 
         // The hook delegate must stay rooted for as long as the hook exists.
         private readonly ShellWin.LowLevelMouseProc hookProc;
@@ -1073,16 +1146,22 @@ namespace DshHud
             int elapsed = now - downTick;
             int dist = Math.Abs(p.X - downPt.X) + Math.Abs(p.Y - downPt.Y);
 
-            if (elapsed < 8000 && dist >= U(6))
+            // A drag is the one gesture that means "I selected text on purpose".
+            if (elapsed < 8000 && dist >= U(10))
             {
                 if (!OverOwnWindows(p)) Kick(p, 130);
             }
             else if (dist < U(4))
             {
+                // Double-click picks a word — a reading gesture, so it counts anywhere
+                // except in an editor, where it grabs a symbol to rename and the gutter
+                // takes a whole line on a single click. The pill there was pure noise.
                 bool second = now - lastClickTick < 520
                     && Math.Abs(p.X - lastClickPt.X) < U(24)
                     && Math.Abs(p.Y - lastClickPt.Y) < U(24);
-                if (second && !OverOwnWindows(p)) Kick(p, 320);
+                if (second && !OverOwnWindows(p)
+                    && ShellWin.DoubleClickWorthProbing(ShellWin.GetForegroundWindow()))
+                    Kick(p, 320);
                 lastClickTick = now;
                 lastClickPt = p;
             }
@@ -1184,17 +1263,20 @@ namespace DshHud
                 int dist = Math.Abs(p.X - downPt.X) + Math.Abs(p.Y - downPt.Y);
                 if (tracing) Log("poll up dist=" + dist + " elapsed=" + elapsed + " own=" + OverOwnWindows(p));
 
-                if (elapsed < 8000 && dist >= U(6))
+                // Same rules as the hook path: drag anywhere, double-click anywhere but
+                // in an editor.
+                if (elapsed < 8000 && dist >= U(10))
                 {
                     if (!OverOwnWindows(p)) Kick(p, 130);
                 }
                 else if (dist < U(4))
                 {
-                    // double-click / triple-click selects a word or a paragraph
                     bool second = now - lastClickTick < 520
                         && Math.Abs(p.X - lastClickPt.X) < U(24)
                         && Math.Abs(p.Y - lastClickPt.Y) < U(24);
-                    if (second && !OverOwnWindows(p)) Kick(p, 320);
+                    if (second && !OverOwnWindows(p)
+                        && ShellWin.DoubleClickWorthProbing(ShellWin.GetForegroundWindow()))
+                        Kick(p, 320);
                     lastClickTick = now;
                     lastClickPt = p;
                 }
@@ -1250,7 +1332,27 @@ namespace DshHud
             int id = ++probeId;
             bool terminal = ShellWin.IsTerminalWindow(subject);
             if (ShellWin.IsGameWindow(subject)) { Log("skip: game window"); return; }
-            Log("kick at " + pt.X + "," + pt.Y + " fg=" + subject + " root=" + root + " class=" + ShellWin.ClassName(subject) + " underCursor=" + ShellWin.ClassAt(pt));
+
+            // Editors publish no text to UI Automation at all (CLion exposes a single pane
+            // and zero TextPattern nodes) and a Ctrl+C there means "copy the whole line",
+            // which is how a stray click put a line of code on the clipboard. So never read
+            // up front in one: hang the pill unread, and send the copy only if the user
+            // clicks it — by then a selection is certain, because that is what they asked
+            // about.
+            if (ShellWin.IsEditorApp(subject))
+            {
+                if (NearWindowEdge(subject, pt))
+                {
+                    Log("skip: editor edge drag " + ShellWin.ProcessNameOf(subject) + " " + ShellWin.ClassName(subject));
+                    return;
+                }
+                Log("pending: editor " + ShellWin.ProcessNameOf(subject) + " at " + pt.X + "," + pt.Y);
+                IntPtr editorTarget = subject;
+                host.BeginInvoke(new MethodInvoker(delegate { ShowPendingButton(pt, editorTarget); }));
+                return;
+            }
+
+            Log("kick at " + pt.X + "," + pt.Y + " fg=" + subject + " exe=" + ShellWin.ProcessNameOf(subject) + " root=" + root + " class=" + ShellWin.ClassName(subject) + " underCursor=" + ShellWin.ClassAt(pt));
 
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
@@ -1322,24 +1424,95 @@ namespace DshHud
         private void ShowButton(SelectionHit hit, Point pt)
         {
             Log("show " + (hit.Text == null ? 0 : hit.Text.Length) + " chars");
+            pending = false;
+            pendingTarget = IntPtr.Zero;
             text = hit.Text;
             shownTick = Environment.TickCount;
             button.ShowNearSelection(hit, pt);
         }
 
+        /// <summary>
+        /// Hang the pill over an editor selection we have not read yet. Nothing is copied
+        /// while it sits there, so a drag that happened to be a scrollbar or a tab can be
+        /// ignored at no cost.
+        /// </summary>
+        private void ShowPendingButton(Point pt, IntPtr target)
+        {
+            SelectionHit hit = new SelectionHit();
+            hit.Text = "";
+            hit.HasRect = false;
+            pending = true;
+            pendingTarget = target;
+            text = "";
+            shownTick = Environment.TickCount;
+            Log("show pending at " + pt.X + "," + pt.Y + " target=" + ShellWin.ProcessNameOf(target));
+            button.ShowNearSelection(hit, pt);
+        }
+
+        /// <summary>
+        /// True when the point sits on the window's scrollbar strip. A drag there scrolls,
+        /// it does not select, and the pill over a scrollbar is noise.
+        /// </summary>
+        private bool NearWindowEdge(IntPtr h, Point p)
+        {
+            try
+            {
+                ShellWin.RECT r;
+                if (!ShellWin.GetWindowRect(h, out r)) return false;
+                int width = r.right - r.left;
+                int height = r.bottom - r.top;
+                if (width <= 0 || height <= 0) return false;
+                int pad = U(22);
+                return p.X >= r.right - pad || p.Y >= r.bottom - pad;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void HideButton()
         {
             text = "";
+            pending = false;
+            pendingTarget = IntPtr.Zero;
             button.Dismiss();
         }
 
         private void OnButtonClicked(object sender, EventArgs e)
         {
-            string got = text;
+            if (pending)
+            {
+                // Clicked in an editor: the pill carries no text yet, so read it now.
+                // The foreground window is still the editor — the pill never activates —
+                // and the key chord is allowed because the click says "this selection".
+                IntPtr target = pendingTarget;
+                HideButton();
+                // The pill is WS_EX_NOACTIVATE, so the editor is still the foreground
+                // window and the key chord lands where the selection is. Only fall back
+                // to the window we recorded if the foreground went away.
+                IntPtr readTarget = ShellWin.GetForegroundWindow();
+                if (readTarget == IntPtr.Zero) readTarget = target;
+                ThreadPool.QueueUserWorkItem(delegate(object state)
+                {
+                    SelectionHit hit = SelectionReader.ReadHit(readTarget, true);
+                    string got = hit.Text;
+                    Log("pending read " + (got == null ? -1 : got.Length) + " chars from " +
+                        ShellWin.ProcessNameOf(readTarget));
+                    if (string.IsNullOrEmpty(got)) return;
+                    Action<string> handler = QuoteRequested;
+                    if (handler == null) return;
+                    try { host.BeginInvoke(new MethodInvoker(delegate { handler(got); })); }
+                    catch { }
+                });
+                return;
+            }
+
+            string got2 = text;
             HideButton();
-            if (string.IsNullOrEmpty(got)) return;
-            Action<string> handler = QuoteRequested;
-            if (handler != null) handler(got);
+            if (string.IsNullOrEmpty(got2)) return;
+            Action<string> handler2 = QuoteRequested;
+            if (handler2 != null) handler2(got2);
         }
     }
 }
