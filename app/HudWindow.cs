@@ -7,6 +7,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -120,9 +121,26 @@ namespace DshHud
         [DllImport("user32.dll")]
         internal static extern bool ShowWindow(IntPtr hWnd, int cmd);
 
+        [DllImport("user32.dll")]
+        internal static extern int GetWindowLong(IntPtr hWnd, int index);
+
+        [DllImport("user32.dll")]
+        internal static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+
+        internal const int GWL_STYLE = -16;
+
+        internal const int WS_MINIMIZEBOX = 0x00020000;
+
+        internal const int WS_SYSMENU = 0x00080000;
+
         internal const int SW_RESTORE = 9;
+
+        /// <summary>Minimise through the shell, so the taskbar button animates like any other window.</summary>
+        internal const int SW_MINIMIZE = 6;
         [DllImport("dwmapi.dll")]
         internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        internal const int WM_NCCALCSIZE = 0x0083;
 
         internal const int WM_NCHITTEST = 0x0084;
         internal const int WM_NCLBUTTONDOWN = 0x00A1;
@@ -162,9 +180,10 @@ namespace DshHud
         private Panel titleBar;
         private Label titleLabel;
         private Label pinButton;
+        private ToolTip tips;
+        private bool loggedIcons;
         private readonly List<Label> iconButtons = new List<Label>();
         private readonly List<int> iconWidths = new List<int>();
-        private Panel gapPanel;
         private System.Windows.Forms.Timer themeTimer;
         private Color chromeBg = Color.FromArgb(247, 247, 248);
         private Color chromeFg = Color.FromArgb(32, 32, 36);
@@ -185,12 +204,22 @@ namespace DshHud
             scale = Native.EffectiveScale();
 
             SuspendLayout();
-            FormBorderStyle = FormBorderStyle.None;
+            // NOT FormBorderStyle.None: DWM only runs the minimise/maximise transition
+            // for a window that still carries a real frame (WS_CAPTION/WS_THICKFRAME).
+            // A borderless form never animates - it just snaps into the taskbar, which is
+            // exactly what the user reported. Keeping Sizable and swallowing
+            // WM_NCCALCSIZE (see WndProc) makes the client area cover the whole window
+            // again, so we still draw our own title bar, but the shell treats us like a
+            // normal window: minimise animation, snap, shadow, resize edges.
+            FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
             Text = title;
             TopMost = true;
             ShowInTaskbar = true;
+
+            MinimizeBox = true;
+            MaximizeBox = false;
             BackColor = Color.FromArgb(247, 247, 248);
             DoubleBuffered = true;
             KeyPreview = true;
@@ -261,19 +290,33 @@ namespace DshHud
             titleLabel.MouseDoubleClick += OnTitleDoubleClick;
             titleBar.Controls.Add(titleLabel);
 
+            tips = new ToolTip();
+            tips.InitialDelay = 400;
+            tips.ReshowDelay = 120;
+
             Label pin = MakeIcon("\uE718", "\u7F6E\u9876", 44);
             pin.Click += delegate { TogglePin(); };
             pinButton = pin;
-
-            Label back = MakeIcon("\uE72B", "\u4E3B", 40);
-            back.Click += delegate { BackToMain(); };
+            tips.SetToolTip(pin, "\u7F6E\u9876\uFF08\u59CB\u7EC8\u5728\u6700\u4E0A\u5C42\uFF09");
 
             Label shot = MakeIcon("\uE722", "\u622A", 40);
             shot.Click += delegate { DoScreenshot(); };
+            tips.SetToolTip(shot, "\u622A\u56FE");
 
             // Region / window picker. Segoe MDL2 "Crop" = E7A8.
             Label crop = MakeIcon("\uE7A8", "\u6846", 40);
             crop.Click += delegate { DoRegionCapture(); };
+            tips.SetToolTip(crop, "\u6846\u9009\u533A\u57DF");
+
+            Label back = MakeIcon("\uE72B", "\u4E3B", 40);
+            back.Click += delegate { BackToMain(); };
+            tips.SetToolTip(back, "\u56DE\u5230\u4E3B\u7A97\u53E3\uFF08\u5C0F\u7A97\u6536\u8FDB\u6258\u76D8\uFF09");
+
+            // Minimise parks the window on the taskbar and keeps the watcher alive,
+            // so the pill still works while the reader is out of the way.
+            Label min = MakeIcon("\uE921", "\u2013", 40);
+            min.Click += delegate { MinimizeToTaskbar(); };
+            tips.SetToolTip(min, "\u6700\u5C0F\u5316\u5230\u4EFB\u52A1\u680F");
 
             // The close glyph is drawn noticeably larger than the others at the same
             // point size, so it gets its own smaller face and a hover highlight.
@@ -282,24 +325,62 @@ namespace DshHud
             close.ForeColor = IconTint();
             close.MouseEnter += delegate { close.BackColor = Color.FromArgb(232, 17, 35); close.ForeColor = Color.White; };
             close.MouseLeave += delegate { close.BackColor = Color.Transparent; close.ForeColor = IconTint(); };
-            close.Click += delegate { HideToTray(); };
+            close.Click += delegate { Close(); };
+            tips.SetToolTip(close, "\u5173\u95ED\u5C0F\u7A97");
 
-            // Small spacer so the last key does not sit on the window border. Right
-            // docking stacks leftwards, so the spacer is added last to stay rightmost.
-            Panel gap = new Panel();
-            gap.Dock = DockStyle.Right;
-            gap.Width = Unit(6);
-            gapPanel = gap;
-
-            titleBar.Controls.Add(close);
             titleBar.Controls.Add(pin);
-            titleBar.Controls.Add(back);
             titleBar.Controls.Add(shot);
             titleBar.Controls.Add(crop);
-            titleBar.Controls.Add(gap);
+            titleBar.Controls.Add(back);
+            titleBar.Controls.Add(min);
+            titleBar.Controls.Add(close);
+
+            LayoutIcons();
+            titleBar.Resize += delegate { LayoutIcons(); };
 
             titleBar.MouseDown += OnDragAreaMouseDown;
             titleBar.MouseDoubleClick += OnTitleDoubleClick;
+        }
+
+        /// <summary>
+        /// The keys are placed by hand rather than by Dock. Right-docking a run of
+        /// labels inside the padded title bar left the middle ones hidden behind the
+        /// title label, so their glyphs never showed up. Laying them out from the
+        /// right edge also keeps every key on screen when the window is narrow.
+        /// </summary>
+        private void LayoutIcons()
+        {
+            if (titleBar == null || iconButtons.Count == 0 || titleBar.Width <= 0) return;
+            int n = iconButtons.Count;
+            int gap = Unit(6);
+            int right = titleBar.Width - gap;
+            int reserved = Unit(84);
+            int natural = 0;
+            for (int i = 0; i < n; i++) natural += Unit(iconWidths[i]);
+            int room = Math.Max(Unit(28) * n, right - reserved);
+            bool squeeze = natural > room;
+            int per = squeeze ? Math.Max(Unit(24), room / n) : 0;
+
+            int x = right;
+            for (int i = n - 1; i >= 0; i--)
+            {
+                Label b = iconButtons[i];
+                int w = squeeze ? per : Unit(iconWidths[i]);
+                x -= w;
+                b.Dock = DockStyle.None;
+                b.Bounds = new Rectangle(Math.Max(0, x), 0, w, titleBar.Height);
+                b.BringToFront();
+            }
+            if (titleLabel != null)
+            {
+                titleLabel.Dock = DockStyle.None;
+                titleLabel.Bounds = new Rectangle(0, 0, Math.Max(Unit(24), x - Unit(4)), titleBar.Height);
+            }
+            if (!loggedIcons && titleBar.Width > Unit(200))
+            {
+                loggedIcons = true;
+                Log("icons bar=" + titleBar.Width + " x=" + x + " natural=" + natural + " squeeze=" + squeeze + " n=" + n);
+            }
         }
 
         private Label MakeIcon(string glyph, string fallback, int width)
@@ -406,8 +487,10 @@ namespace DshHud
         }
 
         /// <summary>
-        /// The close key parks the window in the tray instead of exiting: the selection
+        /// The arrow parks the window in the tray instead of exiting: the selection
         /// watcher lives in this process, so the "问大肥鱼" pill would die with it.
+        /// The close key, by contrast, really closes the window (see the tray keeps
+        /// the service process watching for selections).
         /// </summary>
         private void HideToTray()
         {
@@ -441,6 +524,22 @@ namespace DshHud
 
         // ---------- lifecycle ----------
 
+        /// <summary>
+        /// WinForms strips WS_MINIMIZEBOX from a borderless form's CreateParams, and
+        /// without that bit DWM skips the minimise animation entirely - the window simply
+        /// vanishes into the taskbar. Ask for the bit here (rather than patching the style
+        /// afterwards) so it survives the handle recreations WinForms does on its own.
+        /// </summary>
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.Style |= Native.WS_MINIMIZEBOX | Native.WS_SYSMENU;
+                return cp;
+            }
+        }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
@@ -454,11 +553,35 @@ namespace DshHud
             catch
             {
             }
+
+            // WinForms strips WS_MINIMIZEBOX for FormBorderStyle.None, and without it
+            // DWM skips the minimise animation (the window just teleports to the
+            // taskbar). Put the bit back by hand so the window minimises like any
+            // other window.
+            try
+            {
+                int style = Native.GetWindowLong(Handle, Native.GWL_STYLE);
+                int wanted = style | Native.WS_MINIMIZEBOX | Native.WS_SYSMENU;
+                if (wanted != style)
+                {
+                    Native.SetWindowLong(Handle, Native.GWL_STYLE, wanted);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutIcons();
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            LayoutIcons();
             InitWebViewAsync();
         }
 
@@ -889,8 +1012,101 @@ namespace DshHud
             if (text.IndexOf("\"hide\"", StringComparison.Ordinal) >= 0) { Hide(); return; }
         }
 
-        private void BackToMain()
+        /// <summary>
+        /// Minimise the way the caption button does.
+        ///
+        /// Setting <see cref="Form.WindowState"/> directly re-parents the window without
+        /// the shell's zoom-to-taskbar animation, which is why the window used to vanish
+        /// instead of sliding down. SW_MINIMIZE is the exact message the system sends
+        /// when the user clicks minimise, so the animation comes back for free.
+        /// </summary>
+        private void MinimizeToTaskbar()
         {
+            try
+            {
+                if (Handle != IntPtr.Zero) Native.ShowWindow(Handle, Native.SW_MINIMIZE);
+                else WindowState = FormWindowState.Minimized;
+            }
+            catch
+            {
+                WindowState = FormWindowState.Minimized;
+            }
+        }
+
+        /// <summary>
+        /// The conversation this window is showing.
+        ///
+        /// The pop-out URL carries `session=<id>`, but the app rewrites its own address as
+        /// soon as it boots (query, hash and the hud cookie are all dropped), so the live
+        /// source no longer carries the id. Ask the page instead: it keeps the open
+        /// conversation in localStorage, which also tracks switches made inside the window.
+        /// </summary>
+        private async Task<string> CurrentSessionIdAsync()
+        {
+            try
+            {
+                if (web != null && web.CoreWebView2 != null)
+                {
+                    Task<string> ask = web.CoreWebView2.ExecuteScriptAsync(
+                        "(function(){try{var v=localStorage.getItem('dsh.sessions.current');" +
+                        "if(!v)return '';var o=JSON.parse(v);" +
+                        "return String((o&&o.sessionId)||'')}catch(e){return ''}})()");
+                    if (await Task.WhenAny(ask, Task.Delay(1500)) == ask)
+                    {
+                        string id = Unquote(await ask).Trim();
+                        if (id.Length > 0) return id;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return SessionIdFromUrl();
+        }
+
+        /// <summary>Fallback: the `session=` parameter of the address we opened with.</summary>
+        private string SessionIdFromUrl()
+        {
+            try
+            {
+                string url = null;
+                if (web != null && web.CoreWebView2 != null) url = web.CoreWebView2.Source;
+                if (string.IsNullOrEmpty(url)) url = startUrl;
+                if (string.IsNullOrEmpty(url)) return "";
+                return QueryValue(url, "session");
+            }
+            catch
+            {
+            }
+            return "";
+        }
+
+        /// <summary>
+        /// Hand the conversation over before leaving.
+        ///
+        /// The plugin watches this file and republishes the id; the main window picks it
+        /// up and opens that conversation, so the reader continues where they were
+        /// instead of landing on whatever the main window happened to show last.
+        /// </summary>
+        private async Task HandOffSessionAsync()
+        {
+            try
+            {
+                string sessionId = await CurrentSessionIdAsync();
+                Log("focus: hand off id=" + (string.IsNullOrEmpty(sessionId) ? "<none>" : sessionId));
+                if (string.IsNullOrEmpty(sessionId)) return;
+                File.WriteAllText(Path.Combine(HudConfig.Dir, "focus.txt"), sessionId, new UTF8Encoding(false));
+                Log("focus: wrote " + Path.Combine(HudConfig.Dir, "focus.txt"));
+            }
+            catch (Exception ex)
+            {
+                Log("focus: FAIL " + ex.GetType().Name + " :: " + ex.Message);
+            }
+        }
+
+        private async Task BackToMainAsync()
+        {
+            await HandOffSessionAsync();
             try
             {
                 Process self = Process.GetCurrentProcess();
@@ -907,8 +1123,20 @@ namespace DshHud
             catch
             {
             }
-            Hide();
+            HideToTray();
         }
+
+        private async void BackToMain()
+        {
+            try
+            {
+                await BackToMainAsync();
+            }
+            catch
+            {
+            }
+        }
+
         private void SendToPage(string json)
         {
             if (!ready) return;
@@ -1150,17 +1378,23 @@ namespace DshHud
             MinimumSize = Logical(300, 340);
             if (titleBar != null) titleBar.Height = Unit(36);
             if (titleLabel != null) titleLabel.Padding = new Padding(Unit(12), 0, 0, 0);
-            if (gapPanel != null) gapPanel.Width = Unit(6);
-            for (int i = 0; i < iconButtons.Count && i < iconWidths.Count; i++)
-            {
-                iconButtons[i].Width = Unit(iconWidths[i]);
-            }
+            LayoutIcons();
             Size = Logical(logical.Width, logical.Height);
             Log("dpi scale " + next.ToString("0.##"));
         }
 
         protected override void WndProc(ref Message m)
         {
+            // The form keeps a real frame (see the constructor note about the minimise
+            // animation) but must not *show* one: telling the system the client area is
+            // the whole window removes the non-client border and caption, so we still own
+            // every pixel. Returning without calling base is the standard recipe.
+            if (m.Msg == Native.WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
+            {
+                m.Result = IntPtr.Zero;
+                return;
+            }
+
             if (m.Msg == Native.WM_DPICHANGED)
             {
                 int dpi = (int)(m.WParam.ToInt64() & 0xFFFF);

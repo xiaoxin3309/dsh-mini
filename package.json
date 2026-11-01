@@ -1,6 +1,6 @@
 {
   "name": "dsh-mini",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "DSH 常驻小窗插件：把当前会话一键弹出为独立置顶小窗（WebView2 原生窗口），含整屏/框选截图、划词「问大肥鱼」、全局快捷键与截图自动复制",
   "type": "module",
   "main": "lib/index.js",
@@ -71,6 +71,7 @@
   "dependencies": {},
   "scripts": {
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File app/build-app.ps1",
+    "deploy": "node scripts/sync-profile.mjs",
     "pack": "npm pack"
   },
   "peerDependencies": {

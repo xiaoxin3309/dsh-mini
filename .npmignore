@@ -1,3 +1,4 @@
 # runtime state (config, logs, WebView2 user data) lives next to the exe at runtime
 app/bin/data/
 app/bin/hud-bin.log
+HANDOFF.md
