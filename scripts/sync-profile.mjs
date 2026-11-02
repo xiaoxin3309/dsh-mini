@@ -41,13 +41,18 @@ if (list.length === 0) {
 
 console.log(`packing ${manifest.name}@${manifest.version} …`)
 const staging = mkdtempSync(join(tmpdir(), 'dsh-mini-sync-'))
+// Keep npm's cache inside our staging dir: on this machine the global cache lives
+// under `C:\Program Files\nodejs\node_cache`, which a normal user cannot write
+// (npm dies with EPERM before it ever packs anything).
+const cacheDir = join(staging, 'npm-cache')
+const packArgs = ['pack', '--pack-destination', staging, '--cache', cacheDir, '--silent']
 // Run npm's own entry point through this node binary: `npm.cmd` needs a shell, and a
 // shell would put the arguments through Windows quoting rules for no reason.
 const npmCli = join(resolve(process.execPath, '..'), 'node_modules', 'npm', 'bin', 'npm-cli.js')
 if (existsSync(npmCli)) {
-  execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', staging, '--silent'], { cwd: pluginDir, stdio: 'inherit' })
+  execFileSync(process.execPath, [npmCli, ...packArgs], { cwd: pluginDir, stdio: 'inherit' })
 } else {
-  execFileSync('npm', ['pack', '--pack-destination', staging, '--silent'], { cwd: pluginDir, shell: true, stdio: 'inherit' })
+  execFileSync('npm', packArgs, { cwd: pluginDir, shell: true, stdio: 'inherit' })
 }
 const tarball = readdirSync(staging).find((name) => name.endsWith('.tgz'))
 if (tarball === undefined) throw new Error('npm pack produced no tarball')
