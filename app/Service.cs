@@ -321,7 +321,7 @@ namespace DshHud
             SelectionWatcher.Log("service started url=" + (url == null ? "none" : "yes"));
 
             configTimer = new System.Windows.Forms.Timer();
-            configTimer.Interval = 2500;
+            configTimer.Interval = 700; // also the quit-request latency; Stamp() is a cheap stat
             configTimer.Tick += OnConfigTick;
             configTimer.Start();
         }
@@ -350,6 +350,7 @@ namespace DshHud
         private void OnConfigTick(object sender, EventArgs e)
         {
             CheckPillRect();
+            CheckQuit();
             long stamp = HudConfig.Stamp();
             if (stamp == configStamp) return;
             configStamp = stamp;
@@ -361,6 +362,24 @@ namespace DshHud
             SelectionWatcher.Log("config reloaded: hotkeyFull=" + config.HotkeyFull +
                                  " hotkeyRegion=" + config.HotkeyRegion +
                                  " textFallback=" + (config.TextFallback ? "1" : "0"));
+        }
+
+        /// <summary>
+        /// Cooperative shutdown: the launcher drops quit.txt and waits. This path also
+        /// disposes the tray icon properly, so replacing a helper never leaves a dead
+        /// icon behind (a forced kill does).
+        /// </summary>
+        private void CheckQuit()
+        {
+            try
+            {
+                string path = Path.Combine(HudConfig.Dir, "quit.txt");
+                if (!File.Exists(path)) return;
+                File.Delete(path);
+                SelectionWatcher.Log("service: quit requested");
+                ExitThread();
+            }
+            catch { }
         }
 
         private void OnHotkey(string kind)

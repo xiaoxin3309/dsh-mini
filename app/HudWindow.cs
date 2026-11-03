@@ -336,6 +336,7 @@ namespace DshHud
             titleBar.Controls.Add(close);
 
             LayoutIcons();
+            SyncPinTint();
             titleBar.Resize += delegate { LayoutIcons(); };
 
             titleBar.MouseDown += OnDragAreaMouseDown;
@@ -439,7 +440,23 @@ namespace DshHud
         {
             pinned = !pinned;
             TopMost = pinned;
-            pinButton.ForeColor = pinned ? Color.FromArgb(110, 190, 255) : Color.FromArgb(140, 140, 148);
+            SyncPinTint();
+        }
+
+        /// <summary>
+        /// Paint the pin with its state, not with whatever the theme pass left
+        /// behind: the window starts out pinned, so the very first frame has to
+        /// look exactly like the one after toggling the pin back on.
+        /// </summary>
+        private void SyncPinTint()
+        {
+            if (pinButton == null) return;
+            pinButton.ForeColor = pinned ? PinOnTint() : IconTint();
+        }
+
+        private Color PinOnTint()
+        {
+            return Color.FromArgb(110, 190, 255);
         }
 
         private void BuildWebView()
@@ -912,7 +929,7 @@ namespace DshHud
                 if (titleBar != null) titleBar.BackColor = Blend(bg, fg, 0.04);
                 if (titleLabel != null) titleLabel.ForeColor = fg;
                 for (int i = 0; i < iconButtons.Count; i++) iconButtons[i].ForeColor = IconTint();
-                if (pinButton != null) pinButton.ForeColor = IconTint();
+                SyncPinTint();
 
                 int dark = Luminance(bg) < 0.45 ? 1 : 0;
                 if (IsHandleCreated)
@@ -1537,6 +1554,127 @@ namespace DshHud
             try { File.AppendAllText(path, sb.ToString() + "\r\n", Encoding.UTF8); } catch { }
         }
 
+        /// <summary>
+        /// Kept alive for the life of the process: if this reference ever becomes
+        /// unreachable the mutex is finalized, its handle closes, and the named object
+        /// disappears while the helper is still running — which lets the next launch
+        /// create a second helper.
+        /// </summary>
+        private static Mutex serviceMutexKeepAlive;
+
+        private static string ServicePidPath()
+        {
+            try { return Path.Combine(HudConfig.Dir, "service.pid"); }
+            catch { return null; }
+        }
+
+        private static List<int> ReadServicePids(string path)
+        {
+            List<int> pids = new List<int>();
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return pids;
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    int pid;
+                    if (int.TryParse(line.Trim(), out pid) && pid > 0) pids.Add(pid);
+                }
+            }
+            catch { }
+            return pids;
+        }
+
+        private static void WriteServicePids(string path, List<int> pids)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < pids.Count; i++) sb.Append(pids[i]).Append("\n");
+                File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Ask a helper to exit the polite way: it polls quit.txt and disposes its tray icon
+        /// before leaving. A forced kill would leave the icon in the notification area.
+        /// </summary>
+        private static void RequestServiceQuit()
+        {
+            try
+            {
+                string path = Path.Combine(HudConfig.Dir, "quit.txt");
+                File.WriteAllText(path, "1", new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// The mutex is the real guard, but older builds let it be finalized while running,
+        /// so they are still alive with no claim on it. Each helper records its pid here;
+        /// a new one reaps every earlier entry, so a restart never leaves a tray icon behind.
+        /// </summary>
+        private static void ReapEarlierServices()
+        {
+            string path = ServicePidPath();
+            if (string.IsNullOrEmpty(path)) return;
+            int self = Process.GetCurrentProcess().Id;
+            DateTime selfStart = Process.GetCurrentProcess().StartTime;
+            List<Process> earlier = new List<Process>();
+            List<int> alive = new List<int>();
+            foreach (int pid in ReadServicePids(path))
+            {
+                if (pid == self) continue;
+                try
+                {
+                    Process p = Process.GetProcessById(pid);
+                    if (p.StartTime >= selfStart)
+                    {
+                        // A peer starting at the same moment: the mutex decides, not us.
+                        alive.Add(pid);
+                        continue;
+                    }
+                    earlier.Add(p);
+                }
+                catch { }
+            }
+            if (earlier.Count == 0)
+            {
+                alive.Add(self);
+                WriteServicePids(path, alive);
+                return;
+            }
+            RequestServiceQuit();
+            foreach (Process p in earlier)
+            {
+                bool gone = false;
+                try { gone = p.WaitForExit(1500); } catch { }
+                if (!gone)
+                {
+                    try { p.Kill(); } catch { }
+                }
+                SelectionWatcher.Log("service: reaped pid " + p.Id + (gone ? "" : " (killed)"));
+                try { p.Dispose(); } catch { }
+            }
+            try { File.Delete(Path.Combine(HudConfig.Dir, "quit.txt")); } catch { }
+            alive.Add(self);
+            WriteServicePids(path, alive);
+        }
+
+        private static void ForgetSelfService()
+        {
+            string path = ServicePidPath();
+            if (string.IsNullOrEmpty(path)) return;
+            int self = Process.GetCurrentProcess().Id;
+            List<int> rest = new List<int>();
+            foreach (int pid in ReadServicePids(path))
+            {
+                if (pid != self) rest.Add(pid);
+            }
+            WriteServicePids(path, rest);
+        }
+
         [STAThread]
         private static void Main(string[] argv)
         {
@@ -1602,14 +1740,30 @@ namespace DshHud
             {
                 // One background helper: it owns the selection pill and the global hotkeys,
                 // so "问大肥鱼" works whether or not this window has ever been opened.
+                //
+                // The mutex has to be reachable for the whole process lifetime. A plain
+                // local is dead after this call and the GC is free to finalize it while
+                // Application.Run blocks — closing the last handle destroys the named
+                // object, and the next launch then believes it is the first one. That is
+                // exactly how one extra tray icon piled up per DSH restart.
                 bool serviceCreated;
-                Mutex serviceMutex = new Mutex(true, "Local\\DshHudService", out serviceCreated);
+                serviceMutexKeepAlive = new Mutex(true, "Local\\DshHudService", out serviceCreated);
                 if (!serviceCreated)
                 {
-                    serviceMutex.Dispose();
+                    // Another helper is already serving this session: reuse it instead of
+                    // adding a second tray icon, a second hook and a second pill.
+                    SelectionWatcher.Log("service: already running, exit");
                     return;
                 }
-                Application.Run(new SelectionService(url));
+                ReapEarlierServices();
+                try
+                {
+                    Application.Run(new SelectionService(url));
+                }
+                finally
+                {
+                    ForgetSelfService();
+                }
                 return;
             }
 
