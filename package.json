@@ -1,6 +1,6 @@
 {
   "name": "dsh-mini",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "DSH 常驻小窗插件：把当前会话一键弹出为独立置顶小窗（WebView2 原生窗口），含整屏/框选截图、划词「问大肥鱼」、全局快捷键与截图自动复制",
   "type": "module",
   "main": "lib/index.js",
@@ -25,7 +25,8 @@
     "win32"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.1 <0.3.0"
   },
   "exports": {
     ".": {
