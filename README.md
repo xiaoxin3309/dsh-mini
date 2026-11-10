@@ -225,6 +225,33 @@ cd app
   往 `<data>\seltest.txt` 写任意内容可触发一次「只读不弹」的自检；`<data>\uia.txt`、`<data>\poll.txt`
   分别是 UIA 详情与轮询状态的高噪声追踪，删掉文件即静默（`<data>` = `%LOCALAPPDATA%\dsh-mini\bin\data`）。
 
+## 划词翻译（药丸的右半段）
+
+从 0.1.20 起，划词药丸是两个连着的按钮：左边还是「问大肥鱼」（行为完全没变），右边新增「翻译」。
+
+点「翻译」：
+
+1. 截一张全屏图，**只写到本地缓存**（`data\translate\shots\<id>.png`），浮层里不显示；
+2. 在选区右下角弹一个**独立窗口**（`app/TranslateWindow.cs`，470×560，`TopMost`，不进任务栏），
+   不需要小窗开着 —— 托盘服务常驻时就能用；
+3. 把选中的文字发给模型，流式显示结果。
+
+* 内容规则照抄 `@yfwu2020/dsh-selection-explain` 的翻译提示词：有英文时 `## 翻译`
+  （单词给词头 + 音标、按词性缩进列义项；词组/整句给 `- **原句**：中文`，再单独给整句译文），
+  纯中文时 `## 解读` 讲当前语境含义；两种情形最后都有一行 `> 在本句中：…`。
+* 底部「结合上下文」＝把刚才那张截图作为图片附件再问一遍，回答更贴近界面语境；「重新翻译」＝同一段文字再跑一次。
+* 记录存在 `data\translate\history.json`（最多 200 条），**不进 DSH 的会话列表**，也不占对话；
+  浏览器直接开 `/dsh-mini/translate` 能看历史。
+* `llm.stream` 必须带 `sessionId`（opencode 的 `x-opencode-session` 头只在有 sessionId 时加），
+  这里用 `hud-desk-<id>` 这种一次性会话名。
+* 数据流有两段：原生壳 `DeskShell.Publish` 写 `data\translate\pending.json`，独立窗每 800ms 轮询
+  `/dsh-mini/translate/pending`；页面本体是 `app/translate-page.html`，地址由 `lib/index.js` 的
+  `writeDeskUrl()` 写进 `data\translate-url.txt`（带 token）。
+
+> 顺带修掉一个"划词忽然没反应"：Windows 会在休眠恢复/切换桌面后**静默摘掉**低级鼠标钩子（钩子还在，
+> 但不再回调，日志里连 `skip: disabled` 都没有）。现在 `WatchHook` 每 1.5s 比对光标位置与钩子上次回调时间，
+> 光标动了却静默超过 1.2s 就原地重装（日志 `hook reinstalled (silent)`）。
+
 ## 常驻划词服务、全局快捷键与设置页
 
 小窗关着也要能划词，所以插件会拉起一个常驻进程（同一个 exe 的 `--service` 模式）：
