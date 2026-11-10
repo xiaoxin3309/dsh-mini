@@ -73,6 +73,19 @@ namespace DshHud
         [DllImport("user32.dll")]
         internal static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll")]
+        internal static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+
+        [DllImport("user32.dll")]
+        internal static extern bool GetCursorPos(out POINT p);
+
         [DllImport("user32.dll")]
         internal static extern uint GetClipboardSequenceNumber();
 
@@ -828,18 +841,29 @@ namespace DshHud
         }
     }
 
-    /// <summary>The little pill that follows a selection: "问大肥鱼".</summary>
+    /// <summary>
+    /// The little pill that follows a selection. Two segments with no gap between them:
+    /// "问大肥鱼" keeps the old behaviour and "翻译" hands the same selection to the
+    /// translation desk, which runs outside DSH and keeps its own history.
+    /// </summary>
     internal sealed class AskButton : Form
     {
-        internal event EventHandler Clicked;
+        internal event EventHandler AskClicked;
+        internal event EventHandler TranslateClicked;
 
         private static readonly Color BaseBg = Color.FromArgb(255, 255, 255);
         private static readonly Color HoverBg = Color.FromArgb(243, 244, 246);
         private static readonly Color TextColor = Color.FromArgb(24, 24, 27);
         private static readonly Color BorderColor = Color.FromArgb(206, 208, 214);
+        private static readonly Color DividerColor = Color.FromArgb(228, 230, 234);
 
-        private readonly Label label;
+        private readonly Label askLabel;
+        private readonly Label translateLabel;
         private float scale;
+        private int askWidth;
+        private int translateWidth;
+        private bool hoverAsk;
+        private bool hoverTranslate;
 
         internal AskButton(float scale)
         {
@@ -856,24 +880,33 @@ namespace DshHud
 
             Fingerprint();
 
-            label = new Label();
-            label.Text = "\u95EE\u5927\u80A5\u9C7C";
-            label.AutoSize = false;
-            label.Dock = DockStyle.Fill;
-            label.TextAlign = ContentAlignment.MiddleCenter;
-            label.ForeColor = TextColor;
-            label.BackColor = Color.Transparent;
-            label.Cursor = Cursors.Hand;
-            label.Click += delegate { Fire(); };
-            label.MouseEnter += delegate { SetHover(true); };
-            label.MouseLeave += delegate { SetHover(false); };
-            Controls.Add(label);
+            askLabel = NewSegment("\u95EE\u5927\u80A5\u9C7C", false);
+            translateLabel = NewSegment("\u7FFB\u8BD1", true);
+            Controls.Add(askLabel);
+            Controls.Add(translateLabel);
 
-            MouseEnter += delegate { SetHover(true); };
-            MouseLeave += delegate { SetHover(false); };
-            Click += delegate { Fire(); };
+            Click += delegate { Fire(false); };
 
             ApplyMetrics();
+        }
+
+        /// <summary>
+        /// One half of the pill. The labels cover the whole surface, so the form itself only
+        /// sees the clicks that land on the seam pixel.
+        /// </summary>
+        private Label NewSegment(string text, bool translate)
+        {
+            Label seg = new Label();
+            seg.Text = text;
+            seg.AutoSize = false;
+            seg.TextAlign = ContentAlignment.MiddleCenter;
+            seg.ForeColor = TextColor;
+            seg.BackColor = Color.Transparent;
+            seg.Cursor = Cursors.Hand;
+            seg.Click += delegate { Fire(translate); };
+            seg.MouseEnter += delegate { SetHover(translate, true); };
+            seg.MouseLeave += delegate { SetHover(translate, false); };
+            return seg;
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -895,10 +928,20 @@ namespace DshHud
 
         private void ApplyMetrics()
         {
-            label.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
-            Width = TextRenderer.MeasureText(label.Text, label.Font).Width + U(28);
+            Font f = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+            askLabel.Font = f;
+            translateLabel.Font = f;
+            askWidth = TextRenderer.MeasureText(askLabel.Text, f).Width + U(26);
+            translateWidth = TextRenderer.MeasureText(translateLabel.Text, f).Width + U(20);
+            Width = askWidth + translateWidth;
             Height = U(32);
+            int pad = U(4);
+            askLabel.Bounds = new Rectangle(U(2), pad, askWidth - U(4), Height - pad * 2);
+            translateLabel.Bounds = new Rectangle(askWidth + U(2), pad, translateWidth - U(4), Height - pad * 2);
             ApplyRoundedRegion();
+            Invalidate();
+            SelectionWatcher.Log("pill metrics scale=" + scale.ToString("0.00") + " ask=" + askWidth +
+                                 " tr=" + translateWidth + " w=" + Width + " h=" + Height);
         }
 
         internal void Fingerprint()
@@ -1000,17 +1043,36 @@ namespace DshHud
             return (int)Math.Round(v * scale);
         }
 
-        private void SetHover(bool on)
+        private void SetHover(bool translate, bool on)
         {
-            BackColor = on ? HoverBg : BaseBg;
-            label.ForeColor = TextColor;
+            if (translate) hoverTranslate = on;
+            else hoverAsk = on;
             Invalidate();
         }
 
-        private void Fire()
+        private void Fire(bool translate)
         {
-            EventHandler handler = Clicked;
+            SelectionWatcher.Log("pill fire " + (translate ? "translate" : "ask"));
+            EventHandler handler = translate ? TranslateClicked : AskClicked;
             if (handler != null) handler(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Clicks are the one thing that cannot be verified from the outside, so keep a short
+        /// breadcrumb: which half got the mouse-down, and whether the form saw it at all.
+        /// A missed click means the pill's rounded Region clipped the point away.
+        /// </summary>
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x0201 && m.LParam != IntPtr.Zero)
+            {
+                int lp = m.LParam.ToInt32();
+                int px = lp & 0xffff;
+                int py = (lp >> 16) & 0xffff;
+                SelectionWatcher.Log("pill mousedown " + px + "," + py + " askWidth=" + askWidth +
+                                     " w=" + Width + " child=" + (m.HWnd != Handle));
+            }
+            base.WndProc(ref m);
         }
 
         /// <summary>Capsule outline: the corner radius is half the height, so both ends are fully round.</summary>
@@ -1034,17 +1096,51 @@ namespace DshHud
             }
         }
 
-        /// <summary>A hairline border keeps the white pill readable on white pages.</summary>
+        /// <summary>
+        /// White capsule, a hairline border and a seam between the two segments. The hover
+        /// tint is painted per segment, so the user can tell which half a click will hit.
+        /// </summary>
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             int inset = Math.Max(1, U(1));
-            Rectangle b = new Rectangle(inset, inset, Width - inset * 2 - 1, Height - inset * 2 - 1);
-            using (GraphicsPath path = BuildPath(b))
-            using (Pen pen = new Pen(BorderColor, Math.Max(1f, U(1))))
+            Rectangle full = new Rectangle(0, 0, Width, Height);
+            using (GraphicsPath frame = BuildPath(full))
             {
-                e.Graphics.DrawPath(pen, path);
+                using (SolidBrush bg = new SolidBrush(BaseBg))
+                {
+                    e.Graphics.FillPath(bg, frame);
+                }
+
+                if (hoverAsk || hoverTranslate)
+                {
+                    GraphicsState state = e.Graphics.Save();
+                    e.Graphics.SetClip(frame);
+                    using (SolidBrush hover = new SolidBrush(HoverBg))
+                    {
+                        if (hoverAsk)
+                            e.Graphics.FillRectangle(hover, 0, 0, askWidth, Height);
+                        if (hoverTranslate)
+                            e.Graphics.FillRectangle(hover, askWidth, 0, Width - askWidth, Height);
+                    }
+                    e.Graphics.Restore(state);
+                }
+
+                if (askWidth > inset && askWidth < Width - inset)
+                {
+                    using (Pen divider = new Pen(DividerColor, Math.Max(1f, U(1))))
+                    {
+                        e.Graphics.DrawLine(divider, askWidth, U(8), askWidth, Height - U(8));
+                    }
+                }
+
+                Rectangle b = new Rectangle(inset, inset, Width - inset * 2 - 1, Height - inset * 2 - 1);
+                using (GraphicsPath path = BuildPath(b))
+                using (Pen pen = new Pen(BorderColor, Math.Max(1f, U(1))))
+                {
+                    e.Graphics.DrawPath(pen, path);
+                }
             }
         }
     }
@@ -1056,6 +1152,10 @@ namespace DshHud
     internal sealed class SelectionWatcher : IDisposable
     {
         internal event Action<string> QuoteRequested;
+        internal event Action<string, Rectangle> TranslateRequested;
+
+        internal bool HasQuoteHandler { get { return QuoteRequested != null; } }
+        internal bool HasTranslateHandler { get { return TranslateRequested != null; } }
 
         private readonly Form host;
         private readonly AskButton button;
@@ -1072,6 +1172,9 @@ namespace DshHud
         private int probeId;
         private bool enabled = true;
         private string text = "";
+        // Where the selection was, kept for the translate pill: the desk draws the box into
+        // the screenshot it takes once the user asks for context.
+        private Rectangle lastRect;
         // An editor pill with nothing read behind it (see Kick): the copy is deferred
         // until the user actually clicks it.
         private bool pending;
@@ -1080,6 +1183,12 @@ namespace DshHud
         // The hook delegate must stay rooted for as long as the hook exists.
         private readonly ShellWin.LowLevelMouseProc hookProc;
         private IntPtr hook;
+        // Tick of the last callback the hook delivered, and the cursor it last saw;
+        // WatchHook compares them to notice a hook Windows quietly dropped.
+        private int lastHookTick;
+        private int lastHookTry;
+        private Point lastCursor;
+        private System.Windows.Forms.Timer hookWatch;
 
         internal SelectionWatcher(Form host)
         {
@@ -1087,7 +1196,8 @@ namespace DshHud
             scale = Native.EffectiveScale();
 
             button = new AskButton(scale);
-            button.Clicked += OnButtonClicked;
+            button.AskClicked += OnButtonClicked;
+            button.TranslateClicked += OnTranslateClicked;
 
             timer = new System.Windows.Forms.Timer();
             timer.Interval = 90;
@@ -1102,6 +1212,60 @@ namespace DshHud
                 Log("hook failed err=" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
             else
                 Log("hook installed");
+            lastHookTick = Environment.TickCount;
+            lastCursor = CursorPos();
+
+            // Windows silently unhooks a low-level hook — after a sleep/resume, a
+            // desktop switch, or one callback that took too long. The window shell hid
+            // this because it is opened fresh and simply works; the tray service ran for
+            // a day and then stopped seeing drags entirely. Compare the cursor position
+            // with the ticks the hook last delivered: the cursor moving while the hook
+            // stays silent proves the hook is gone. Keyboard-only activity is ignored,
+            // which keeps this from re-installing while someone types.
+            hookWatch = new System.Windows.Forms.Timer();
+            hookWatch.Interval = 1500;
+            hookWatch.Tick += WatchHook;
+            hookWatch.Start();
+        }
+
+        private static Point CursorPos()
+        {
+            ShellWin.POINT p;
+            if (!ShellWin.GetCursorPos(out p)) return new Point(-1, -1);
+            return new Point(p.X, p.Y);
+        }
+
+        private void InstallHook(string why)
+        {
+            int now = Environment.TickCount;
+            lastHookTry = now;
+            if (hook != IntPtr.Zero)
+            {
+                try { ShellWin.UnhookWindowsHookEx(hook); } catch { }
+                hook = IntPtr.Zero;
+            }
+            hook = ShellWin.SetWindowsHookEx(ShellWin.WH_MOUSE_LL, hookProc, IntPtr.Zero, 0);
+            lastHookTick = now;
+            if (hook == IntPtr.Zero)
+                Log("hook reinstall failed err=" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            else
+                Log("hook reinstalled (" + why + ")");
+        }
+
+        private void WatchHook(object sender, EventArgs e)
+        {
+            if (!enabled) return;
+            int now = Environment.TickCount;
+            if (hook == IntPtr.Zero)
+            {
+                if (unchecked(now - lastHookTry) < 15000) return;
+                InstallHook("retry");
+                return;
+            }
+            Point cp = CursorPos();
+            bool moved = cp.X != lastCursor.X || cp.Y != lastCursor.Y;
+            lastCursor = cp;
+            if (moved && unchecked(now - lastHookTick) > 1200) InstallHook("silent");
         }
 
         private IntPtr OnMouseHook(int nCode, IntPtr wParam, IntPtr lParam)
@@ -1110,6 +1274,7 @@ namespace DshHud
             {
                 if (nCode >= 0)
                 {
+                    lastHookTick = Environment.TickCount;
                     int msg = wParam.ToInt32();
                     if (msg == ShellWin.WM_LBUTTONDOWN || msg == ShellWin.WM_LBUTTONUP)
                     {
@@ -1204,7 +1369,21 @@ namespace DshHud
             }
             try
             {
-                button.Clicked -= OnButtonClicked;
+                if (hookWatch != null)
+                {
+                    hookWatch.Stop();
+                    hookWatch.Tick -= WatchHook;
+                    hookWatch.Dispose();
+                    hookWatch = null;
+                }
+            }
+            catch
+            {
+            }
+            try
+            {
+                button.AskClicked -= OnButtonClicked;
+                button.TranslateClicked -= OnTranslateClicked;
                 button.Dispose();
             }
             catch
@@ -1427,6 +1606,7 @@ namespace DshHud
             pending = false;
             pendingTarget = IntPtr.Zero;
             text = hit.Text;
+            lastRect = hit.HasRect ? hit.Rect : Rectangle.Empty;
             shownTick = Environment.TickCount;
             button.ShowNearSelection(hit, pt);
         }
@@ -1444,6 +1624,7 @@ namespace DshHud
             pending = true;
             pendingTarget = target;
             text = "";
+            lastRect = Rectangle.Empty;
             shownTick = Environment.TickCount;
             Log("show pending at " + pt.X + "," + pt.Y + " target=" + ShellWin.ProcessNameOf(target));
             button.ShowNearSelection(hit, pt);
@@ -1481,6 +1662,23 @@ namespace DshHud
 
         private void OnButtonClicked(object sender, EventArgs e)
         {
+            DeliverPill(false);
+        }
+
+        private void OnTranslateClicked(object sender, EventArgs e)
+        {
+            DeliverPill(true);
+        }
+
+        /// <summary>
+        /// Read the selection (still deferred for an editor pill) and hand it over: ask → the
+        /// HUD composer, translate → the translation desk. The selection rectangle travels
+        /// with the text so the desk can mark where it came from when it takes a screenshot.
+        /// </summary>
+        private void DeliverPill(bool translate)
+        {
+            Log("deliver pill translate=" + translate + " pending=" + pending +
+                " len=" + (text == null ? -1 : text.Length));
             if (pending)
             {
                 // Clicked in an editor: the pill carries no text yet, so read it now.
@@ -1500,19 +1698,44 @@ namespace DshHud
                     Log("pending read " + (got == null ? -1 : got.Length) + " chars from " +
                         ShellWin.ProcessNameOf(readTarget));
                     if (string.IsNullOrEmpty(got)) return;
-                    Action<string> handler = QuoteRequested;
-                    if (handler == null) return;
-                    try { host.BeginInvoke(new MethodInvoker(delegate { handler(got); })); }
-                    catch { }
+                    DeliverFromWorker(translate, got, hit.HasRect ? hit.Rect : Rectangle.Empty);
                 });
                 return;
             }
 
             string got2 = text;
+            Rectangle rect = lastRect;
             HideButton();
             if (string.IsNullOrEmpty(got2)) return;
-            Action<string> handler2 = QuoteRequested;
-            if (handler2 != null) handler2(got2);
+            if (translate) RaiseTranslate(got2, rect);
+            else RaiseQuote(got2);
+        }
+
+        private void DeliverFromWorker(bool translate, string got, Rectangle rect)
+        {
+            try
+            {
+                host.BeginInvoke(new MethodInvoker(delegate
+                {
+                    if (translate) RaiseTranslate(got, rect);
+                    else RaiseQuote(got);
+                }));
+            }
+            catch { }
+        }
+
+        private void RaiseQuote(string got)
+        {
+            Action<string> handler = QuoteRequested;
+            Log("raise quote handler=" + (handler != null));
+            if (handler != null) handler(got);
+        }
+
+        private void RaiseTranslate(string got, Rectangle rect)
+        {
+            Action<string, Rectangle> handler = TranslateRequested;
+            Log("raise translate handler=" + (handler != null));
+            if (handler != null) handler(got, rect);
         }
     }
 }

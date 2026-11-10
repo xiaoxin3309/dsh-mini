@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>翻译</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    background: #fff; color: #18181b;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid #ececef; flex: none;
+  }
+  header h1 { font-size: 14px; font-weight: 650; margin: 0; }
+  header .stat { flex: 1; font-size: 12px; color: #8b8b93; }
+  header button {
+    border: 1px solid #e0e1e5; background: #fff; border-radius: 8px;
+    padding: 3px 10px; font-size: 12px; color: #3f3f46; cursor: pointer;
+  }
+  header button:hover { background: #f4f4f5; }
+  main { flex: 1; overflow: auto; padding: 14px; }
+  .src {
+    background: #f7f7f8; border: 1px solid #ececef; border-radius: 10px;
+    padding: 10px 12px; margin: 0 0 12px; white-space: pre-wrap; word-break: break-word;
+    font-size: 13px; color: #3f3f46; max-height: 132px; overflow: auto;
+  }
+  .answer { white-space: pre-wrap; word-break: break-word; font-size: 13.5px; color: #27272a; min-height: 60px; }
+  .answer h2 { font-size: 13.5px; margin: 14px 0 6px; color: #18181b; }
+  .answer h2:first-child { margin-top: 0; }
+  .answer ul { margin: 4px 0 4px 0; padding-left: 18px; }
+  .answer li { margin: 2px 0; }
+  .answer li.sub { margin-left: 14px; list-style: none; }
+  .answer .quote {
+    margin: 12px 0 0; padding: 8px 10px; border-left: 3px solid #d4d4d8;
+    background: #fafafa; color: #3f3f46; border-radius: 0 8px 8px 0; font-size: 13px;
+  }
+  .answer strong { font-weight: 650; color: #18181b; }
+  .hint { color: #a1a1aa; font-size: 12.5px; }
+  .error { color: #b42318; font-size: 13px; }
+  footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #ececef; flex: none; }
+  footer button {
+    border: 1px solid #e0e1e5; background: #fff; border-radius: 8px;
+    padding: 5px 12px; font-size: 12.5px; color: #3f3f46; cursor: pointer;
+  }
+  footer button:hover:not(:disabled) { background: #f4f4f5; }
+  footer button:disabled { opacity: .5; cursor: default; }
+  footer .grow { flex: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>翻译</h1>
+  <div class="stat" id="stat"></div>
+  <button id="copy" type="button">复制</button>
+</header>
+<main>
+  <div class="src" id="src"></div>
+  <div class="answer" id="answer"><span class="hint">等待选中内容…</span></div>
+</main>
+<footer>
+  <button id="ctx" type="button" disabled>结合上下文</button>
+  <button id="retry" type="button" disabled>重新翻译</button>
+  <span class="grow"></span>
+  <button id="close" type="button">关闭</button>
+</footer>
+<script>
+(function () {
+  var src = document.getElementById('src');
+  var answer = document.getElementById('answer');
+  var stat = document.getElementById('stat');
+  var btnCtx = document.getElementById('ctx');
+  var btnRetry = document.getElementById('retry');
+  var btnCopy = document.getElementById('copy');
+  var btnClose = document.getElementById('close');
+
+  var seq = -1, id = '', text = '', busy = false, finished = false;
+  var controller = null, answerText = '', mode = 'translate';
+
+  function setStat(s) { stat.textContent = s || ''; }
+  function setBusy(on) {
+    busy = on;
+    btnCtx.disabled = on || !id;
+    btnRetry.disabled = on || !id;
+  }
+
+  function inline(s) {
+    var parts = String(s).split(/\*\*/);
+    var out = '';
+    for (var i = 0; i < parts.length; i++) {
+      out += (i % 2 === 1 ? '<strong>' + esc(parts[i]) + '</strong>' : esc(parts[i]));
+    }
+    return out;
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /* The prompt fixes the shape (## heading, - item, two-space sub-item, > tail), so a
+     tiny renderer is enough and safer than pulling in a markdown library. */
+  function render(markdown) {
+    var lines = String(markdown || '').split('\n');
+    var out = '', inList = false;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var t = line.trim();
+      if (t === '') { if (inList) { out += '</ul>'; inList = false; } continue; }
+      if (t.indexOf('## ') === 0) {
+        if (inList) { out += '</ul>'; inList = false; }
+        out += '<h2>' + inline(t.slice(3)) + '</h2>';
+        continue;
+      }
+      if (t.indexOf('- ') === 0) {
+        if (!inList) { out += '<ul>'; inList = true; }
+        out += '<li>' + inline(t.slice(2)) + '</li>';
+        continue;
+      }
+      if (/^ {2,}/.test(line)) {
+        if (!inList) { out += '<ul>'; inList = true; }
+        out += '<li class="sub">' + inline(t) + '</li>';
+        continue;
+      }
+      if (t.charAt(0) === '>') {
+        if (inList) { out += '</ul>'; inList = false; }
+        out += '<div class="quote">' + inline(t.slice(1).trim()) + '</div>';
+        continue;
+      }
+      if (inList) { out += '</ul>'; inList = false; }
+      out += '<div>' + inline(t) + '</div>';
+    }
+    if (inList) out += '</ul>';
+    return out;
+  }
+
+  function abort() {
+    if (controller) { try { controller.abort(); } catch (e) {} controller = null; }
+  }
+
+  function run(nextMode) {
+    if (!id || !text) return;
+    abort();
+    mode = nextMode;
+    answerText = '';
+    finished = false;
+    answer.innerHTML = '<span class="hint">正在翻译…</span>';
+    setBusy(true);
+    setStat(nextMode === 'context' ? '结合截图再看一次' : '');
+
+    controller = new AbortController();
+    fetch('/dsh-mini/translate/describe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: id, text: text, mode: nextMode }),
+      signal: controller.signal
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function pump() {
+        return reader.read().then(function (step) {
+          if (step.done) return;
+          buffer += decoder.decode(step.value, { stream: true });
+          var cut = buffer.indexOf('\n\n');
+          while (cut >= 0) {
+            consume(buffer.slice(0, cut));
+            buffer = buffer.slice(cut + 2);
+            cut = buffer.indexOf('\n\n');
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (err) {
+      if (err && err.name === 'AbortError') return;
+      finish('<span class="error">' + esc(err.message || err) + '</span>');
+    });
+  }
+
+  function consume(chunk) {
+    var event = 'message', data = '';
+    var lines = chunk.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.indexOf('event:') === 0) event = line.slice(6).trim();
+      else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+    }
+    var payload = null;
+    try { payload = data ? JSON.parse(data) : null; } catch (e) { return; }
+    if (event === 'start') {
+      if (payload && payload.model) setStat('模型 ' + payload.model);
+    } else if (event === 'delta') {
+      answerText += payload.text || '';
+      answer.innerHTML = render(answerText);
+    } else if (event === 'warn') {
+      setStat(String(payload.message || ''));
+    } else if (event === 'error') {
+      finish('<span class="error">' + esc(payload.message || '失败') + '</span>');
+    } else if (event === 'done') {
+      done();
+    }
+  }
+
+  function done() {
+    if (finished) return;
+    finished = true;
+    answer.innerHTML = render(answerText) || '<span class="hint">没有结果</span>';
+    setStat('');
+    setBusy(false);
+  }
+
+  function finish(html) {
+    if (finished) return;
+    finished = true;
+    answer.innerHTML = html;
+    setBusy(false);
+  }
+
+  function open(p) {
+    id = p.id || '';
+    text = p.text || '';
+    src.textContent = text;
+    answer.innerHTML = '<span class="hint">正在翻译…</span>';
+    setBusy(true);
+    run('translate');
+  }
+
+  /* The helper parks one payload file per click; the sequence number is what tells a
+     repeated poll from a genuinely new selection. */
+  function poll() {
+    fetch('/dsh-mini/translate/pending', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (p) {
+        if (p && typeof p.seq === 'number' && p.seq !== seq && p.text) {
+          seq = p.seq;
+          open(p);
+        }
+      })
+      .catch(function () {});
+  }
+
+  btnRetry.addEventListener('click', function () { run('translate'); });
+  btnCtx.addEventListener('click', function () { run('context'); });
+  btnCopy.addEventListener('click', function () {
+    var value = answerText || '';
+    if (!value) return;
+    var done = function () { setStat('已复制'); setTimeout(function () { setStat(''); }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, function () {});
+    } else {
+      var area = document.createElement('textarea');
+      area.value = value;
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand('copy'); done(); } catch (e) {}
+      document.body.removeChild(area);
+    }
+  });
+  btnClose.addEventListener('click', function () {
+    if (window.chrome && chrome.webview && chrome.webview.postMessage) {
+      chrome.webview.postMessage({ type: 'cmd', cmd: 'close' });
+    } else {
+      window.close();
+    }
+  });
+
+  poll();
+  setInterval(poll, 800);
+})();
+</script>
+</body>
+</html>

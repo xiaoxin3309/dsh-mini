@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -63,6 +63,7 @@ namespace DshHud
 
         internal static string ConfigPath { get { return Path.Combine(Dir, "config.ini"); } }
         internal static string QuotePath { get { return Path.Combine(Dir, "quote.txt"); } }
+        internal static string TranslatePath { get { return Path.Combine(Dir, "translate.json"); } }
         internal static string CmdPath { get { return Path.Combine(Dir, "cmd.txt"); } }
 
         internal static HudConfig Load()
@@ -291,6 +292,9 @@ namespace DshHud
 
             watcher = new SelectionWatcher(host);
             watcher.QuoteRequested += DeliverQuote;
+            watcher.TranslateRequested += DeliverTranslate;
+            SelectionWatcher.Log("service wired quote=" + watcher.HasQuoteHandler +
+                                 " translate=" + watcher.HasTranslateHandler);
             watcher.Enabled = config.Ask;
             SelectionReader.ClipboardFallback = config.TextFallback;
 
@@ -411,6 +415,18 @@ namespace DshHud
             OpenHud();
         }
 
+        /// <summary>
+        /// The translate pill went off: freeze the screen around the selection and park one
+        /// request for the plugin. The screenshot is taken here, while the source window is
+        /// still on top and the pill is already hidden, so the desk never has to ask for a
+        /// second capture; it only uses it when the user asks for context.
+        /// </summary>
+        private void DeliverTranslate(string text, Rectangle selection)
+        {
+            // Same desk as the window path: publish the selection and let the standalone
+            // window poll it. Nothing is pushed into the small window's page any more.
+            DeskShell.Publish(text, selection);
+        }
         private void OpenHud()
         {
             try
@@ -473,6 +489,81 @@ namespace DshHud
                 try { if (host != null) host.Dispose(); } catch { }
             }
             base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>
+    /// One "翻译" click, serialised as JSON for the plugin: the selected text, where it sat
+    /// on screen, and a PNG of the moment it was clicked. The shot is never marked up here —
+    /// the desk draws the selection box in the browser, so the pixels stay honest.
+    /// </summary>
+    internal sealed class TranslateCapture
+    {
+        internal string Text;
+        internal Rectangle Selection;
+        internal Rectangle Screen;
+        internal Bitmap Shot;
+
+        internal string ToJson()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("{\"text\":").Append(Quote(Text == null ? "" : Text));
+            sb.Append(",\"selection\":").Append(Rect(Selection));
+            sb.Append(",\"screen\":").Append(Rect(Screen));
+            sb.Append(",\"shotWidth\":").Append(Shot == null ? 0 : Shot.Width);
+            sb.Append(",\"shotHeight\":").Append(Shot == null ? 0 : Shot.Height);
+            sb.Append(",\"shot\":");
+            if (Shot == null)
+            {
+                sb.Append("null");
+            }
+            else
+            {
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    Shot.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                    sb.Append(Quote("data:image/png;base64," + Convert.ToBase64String(ms.ToArray())));
+                }
+            }
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        internal void Dispose()
+        {
+            if (Shot != null)
+            {
+                try { Shot.Dispose(); } catch { }
+                Shot = null;
+            }
+        }
+
+        private static string Rect(Rectangle r)
+        {
+            return "{\"x\":" + r.X + ",\"y\":" + r.Y + ",\"w\":" + r.Width + ",\"h\":" + r.Height + "}";
+        }
+
+        private static string Quote(string s)
+        {
+            StringBuilder sb = new StringBuilder(s.Length + 2);
+            sb.Append('"');
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            sb.Append('"');
+            return sb.ToString();
         }
     }
 }

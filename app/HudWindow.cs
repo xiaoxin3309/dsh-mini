@@ -173,6 +173,9 @@ namespace DshHud
         private SelectionWatcher watcher;
         private ToolStripMenuItem askMenuItem;
         private string pendingQuote;
+        // One translate request, already serialised by the helper: forwarded verbatim so the
+        // desk in the page reads the same text/selection/screenshot the click produced.
+        private string pendingTranslate;
         private string pendingCmd;
         private HudConfig config;
         private long configStamp;
@@ -251,6 +254,7 @@ namespace DshHud
 
             watcher = new SelectionWatcher(this);
             watcher.QuoteRequested += AskAboutSelection;
+            watcher.TranslateRequested += TranslateSelection;
             watcher.Enabled = ReadAskFlag();
 
             config = HudConfig.Load();
@@ -519,8 +523,12 @@ namespace DshHud
         {
             try
             {
-                if (!File.Exists(askFlagPath)) return true;
-                return File.ReadAllText(askFlagPath).Trim() != "0";
+                // The tray service and this window must agree on one answer, and the
+                // settings page only ever writes config.ini. ask.txt stays as an
+                // override for builds that predate the shared config.
+                if (File.Exists(askFlagPath))
+                    return File.ReadAllText(askFlagPath).Trim() != "0";
+                return HudConfig.Load().Ask;
             }
             catch
             {
@@ -533,6 +541,17 @@ namespace DshHud
             try
             {
                 File.WriteAllText(askFlagPath, on ? "1" : "0", Encoding.UTF8);
+            }
+            catch
+            {
+            }
+            // Mirror the tray menu into config.ini so the background service (which
+            // reloads on the file stamp) follows the same switch.
+            try
+            {
+                HudConfig cfg = HudConfig.Load();
+                cfg.Ask = on;
+                cfg.Save();
             }
             catch
             {
@@ -759,6 +778,20 @@ namespace DshHud
                     }
                 }
 
+                string translate = HudConfig.TranslatePath;
+                if (File.Exists(translate))
+                {
+                    string json = File.ReadAllText(translate, Encoding.UTF8);
+                    File.Delete(translate);
+                    if (!string.IsNullOrEmpty(json))
+                    {
+                        Log("translate from service " + json.Length + " chars");
+                        pendingTranslate = json;
+                        RestoreFromTray();
+                        if (ready && web != null && web.CoreWebView2 != null) FlushPendingTranslate();
+                    }
+                }
+
                 string cmd = HudConfig.CmdPath;
                 if (File.Exists(cmd))
                 {
@@ -885,6 +918,24 @@ namespace DshHud
                 QuoteAsync(pendingQuote);
                 pendingQuote = null;
             }
+            if (pendingTranslate != null && web != null && web.CoreWebView2 != null)
+            {
+                FlushPendingTranslate();
+            }
+        }
+
+        /// <summary>
+        /// Hands one frozen pill click to the desk in the page. The JSON is written by the
+        /// helper and passed through untouched, screenshot included, so the page never has
+        /// to ask the disk (or a second capture) for what it should already have.
+        /// </summary>
+        private void FlushPendingTranslate()
+        {
+            if (pendingTranslate == null) return;
+            string json = pendingTranslate;
+            pendingTranslate = null;
+            Log("translate -> page " + json.Length + " chars");
+            SendToPage("{\"type\":\"translate\",\"payload\":" + json + "}");
         }
 
         /// <summary>
@@ -1178,6 +1229,18 @@ namespace DshHud
             pendingQuote = text;
             RestoreFromTray();
             if (ready && web != null && web.CoreWebView2 != null) FlushPendingQuote();
+        }
+
+        /// <summary>
+        /// The pill's "翻译" half. This window owns a watcher of its own (the tray service has
+        /// a separate one), so the desk has to be fed here as well: take the screen grab
+        /// before restoring, pack text + rectangle + shot into one payload and push it.
+        /// </summary>
+        private void TranslateSelection(string text, Rectangle selection)
+        {
+            // The desk lives in its own window now; all it needs is the selection and a
+            // frozen screen, which DeskShell writes next to the shell's data directory.
+            DeskShell.Publish(text, selection);
         }
 
         private void FlushPendingQuote()
